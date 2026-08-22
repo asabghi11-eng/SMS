@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SMS Bomber Bot - نسخه Render با Web Server
+SMS Bomber Bot - نسخه Webhook برای Render
 """
 
 import os
@@ -21,12 +21,10 @@ try:
     from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
     import cloudscraper
     from colorama import Fore, init
-    from flask import Flask
+    from flask import Flask, request
     init(autoreset=True)
 except ImportError as e:
-    print(f"❌ خطا در وارد کردن ماژول‌ها: {e}")
-    print("لطفاً پیش‌نیازها را نصب کنید:")
-    print("pip install python-telegram-bot==20.7 httpx colorama cloudscraper flask")
+    print(f"❌ خطا: {e}")
     sys.exit(1)
 
 # ============================================================================
@@ -617,10 +615,28 @@ class TelegramBot:
             await self.results(update, context)
 
 # ============================================================================
-# Web Server برای Render
+# Webhook Setup
 # ============================================================================
 
+# ایجاد اپلیکیشن Flask
 app = Flask(__name__)
+
+# ایجاد ربات
+bot = TelegramBot()
+application = Application.builder().token(bot.token).build()
+
+# اضافه کردن هندلرها
+application.add_handler(CommandHandler("start", bot.start))
+application.add_handler(CommandHandler("cancel", bot.cancel))
+application.add_handler(CallbackQueryHandler(bot.callback_handler))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_target))
+
+# ذخیره reference به ربات برای استفاده در Webhook
+bot.app = application
+
+# ============================================================================
+# Flask Routes
+# ============================================================================
 
 @app.route('/')
 def home():
@@ -634,31 +650,31 @@ def health():
 def ping():
     return "PONG", 200
 
-# ============================================================================
-# اجرای ربات - نسخه اصلاح شده
-# ============================================================================
+@app.route('/webhook', methods=['POST'])
+async def webhook():
+    """دریافت آپدیت از تلگرام"""
+    try:
+        update_data = request.get_json()
+        update = Update.de_json(update_data, application.bot)
+        await application.process_update(update)
+        return "OK", 200
+    except Exception as e:
+        print(f"❌ Webhook error: {e}")
+        return "ERROR", 500
 
-async def run_bot_async():
-    """اجرای ربات به صورت Async"""
-    bot = TelegramBot()
-    bot.app = Application.builder().token(bot.token).build()
-    
-    bot.app.add_handler(CommandHandler("start", bot.start))
-    bot.app.add_handler(CommandHandler("cancel", bot.cancel))
-    bot.app.add_handler(CallbackQueryHandler(bot.callback_handler))
-    bot.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_target))
-    
-    print(f"🤖 ربات شروع شد!")
-    print(f"👑 ادمین: {ADMIN_IDS[0]}")
-    print(f"📊 اندپوینت‌ها: {len(SITES)}")
-    
-    await bot.app.initialize()
-    await bot.app.start()
-    await bot.app.updater.start_polling()
-    
-    # نگه داشتن ربات در حال اجرا
-    while True:
-        await asyncio.sleep(1)
+@app.route('/set_webhook', methods=['GET'])
+def set_webhook():
+    """تنظیم Webhook"""
+    try:
+        webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_URL', 'localhost')}/webhook"
+        import requests
+        response = requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+            json={"url": webhook_url}
+        )
+        return response.json()
+    except Exception as e:
+        return {"error": str(e)}
 
 # ============================================================================
 # اجرای اصلی
@@ -667,17 +683,22 @@ async def run_bot_async():
 if __name__ == "__main__":
     print("""
 ╔══════════════════════════════════════════════╗
-║     SMS BOMBER BOT + WEB SERVER             ║
+║     SMS BOMBER BOT + WEBHOOK                ║
 ║     برای Render                             ║
 ╚══════════════════════════════════════════════╝
     """)
     
-    # اجرای ربات در یک ترد جداگانه با event loop جدید
-    def start_bot_thread():
-        asyncio.run(run_bot_async())
-    
-    bot_thread = threading.Thread(target=start_bot_thread, daemon=True)
-    bot_thread.start()
+    # تنظیم Webhook در استارت
+    try:
+        import requests
+        webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_URL', 'localhost')}/webhook"
+        response = requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+            json={"url": webhook_url}
+        )
+        print(f"✅ Webhook set: {response.json()}")
+    except Exception as e:
+        print(f"⚠️ Webhook setup error: {e}")
     
     print(f"🌐 Web Server running on port {PORT}")
     app.run(host='0.0.0.0', port=PORT)
