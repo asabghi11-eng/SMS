@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-BOT_TOKEN = os.getenv("8586016384:AAFNSMHw-2TsJGZBcHKNOHrOzOa_HliZC9E")
+BOT_TOKEN = os.getenv("8586016384:AAHsfIE6JdmzBpp650lbw_9w25FBt8Tfbdg")
 WEBHOOK_URL = os.getenv("https://sms-4-mntp.onrender.com/webhook")
 
 if not BOT_TOKEN:
