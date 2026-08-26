@@ -23,7 +23,23 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# Environment
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable is not set")
+
+if not WEBHOOK_URL:
+    render_url = os.getenv("RENDER_EXTERNAL_URL")
+
+    if render_url:
+        WEBHOOK_URL = f"{render_url.rstrip('/')}/webhook"
+    else:
+        service_name = os.getenv(
+            "RENDER_SERVICE_NAME",
+            "sms-bomber-bot-dsxz"
+        )
+        WEBHOOK_URL = f"https://{service_name}.onrender.com/webhook"
 # ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -294,3 +310,4 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=port
     )
+
