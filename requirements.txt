@@ -6,3 +6,5 @@ aiofiles==23.1.0
 flask==3.0.0
 gunicorn==21.2.0
 eventlet==0.33.3
+pydantic==2.3.0
+pydantic-core==2.6.3
