@@ -1,139 +1,88 @@
 import os
-import asyncio
 import logging
 
-from flask import Flask, request, jsonify
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import Command, CommandStart
 from aiogram.types import Update
 
-
-# ============================================================
-# Logging
-# ============================================================
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
-logger = logging.getLogger("telegram-bot")
-
-
-# ============================================================
-# Environment
-# ============================================================
+logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not configured")
 
+BASE_URL = (
+    os.getenv("WEBHOOK_URL")
+    or os.getenv("RENDER_EXTERNAL_URL")
+    or "https://sms-4-mntp.onrender.com"
+).rstrip("/")
 
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+WEBHOOK_URL = BASE_URL + "/webhook"
 
-if not RENDER_EXTERNAL_URL:
-    raise RuntimeError("RENDER_EXTERNAL_URL is not configured")
-
-
-WEBHOOK_URL = RENDER_EXTERNAL_URL.rstrip("/") + "/webhook"
-
-
-logger.info("BOT_TOKEN configured")
-logger.info("WEBHOOK_URL: %s", WEBHOOK_URL)
-
-
-# ============================================================
-# Flask
-# ============================================================
-
-app = Flask(__name__)
-
-
-# ============================================================
-# Telegram
-# ============================================================
-
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
 
-# ============================================================
-# Event loop
-# ============================================================
-
-loop = asyncio.new_event_loop()
-
-
-def run_loop():
-    asyncio.set_event_loop(loop)
-    logger.info("Async event loop started")
-    loop.run_forever()
-
-
-import threading
-
-threading.Thread(
-    target=run_loop,
-    daemon=True,
-    name="telegram-loop",
-).start()
-
-
-# ============================================================
-# Handlers
-# ============================================================
-
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
-
-    logger.info(
-        "START received from user=%s",
-        message.from_user.id if message.from_user else "unknown",
-    )
-
     await message.answer(
         "👋 سلام!\n\n"
-        "✅ ربات آنلاین است.\n"
-        "🚀 Webhook روی Render فعال است.\n\n"
+        "✅ ربات فعال است.\n"
         "برای تست /ping را بفرست."
     )
 
 
 @dp.message(Command("ping"))
 async def ping_handler(message: types.Message):
+    await message.answer("🏓 Pong!\n✅ ربات فعال است.")
 
-    logger.info(
-        "PING received from user=%s",
-        message.from_user.id if message.from_user else "unknown",
+
+async def webhook(request: web.Request):
+    try:
+        data = await request.json()
+
+        update = Update.model_validate(data)
+
+        logger.info(
+            "Telegram update received: %s",
+            update.update_id,
+        )
+
+        await dp.feed_update(bot, update)
+
+        return web.json_response({"ok": True})
+
+    except Exception:
+        logger.exception("Webhook error")
+        return web.json_response(
+            {"ok": False},
+            status=500,
+        )
+
+
+async def home(request):
+    return web.Response(
+        text="Telegram Bot is running!",
+        status=200,
     )
 
-    await message.answer(
-        "🏓 Pong!\n"
-        "✅ اتصال Telegram → Render → Bot سالم است."
+
+async def health(request):
+    return web.Response(
+        text="OK",
+        status=200,
     )
 
 
-@dp.message()
-async def any_message_handler(message: types.Message):
-
-    logger.info(
-        "MESSAGE received: %s",
-        message.text,
-    )
-
-    await message.answer(
-        "📩 پیام دریافت شد."
-    )
-
-
-# ============================================================
-# Telegram initialization
-# ============================================================
-
-async def initialize_telegram():
-
-    logger.info("----------------------------------------")
+async def on_startup(app):
     logger.info("Initializing Telegram...")
 
     me = await bot.get_me()
@@ -141,10 +90,6 @@ async def initialize_telegram():
     logger.info(
         "Bot: @%s",
         me.username,
-    )
-
-    await bot.delete_webhook(
-        drop_pending_updates=False
     )
 
     await bot.set_webhook(
@@ -155,172 +100,44 @@ async def initialize_telegram():
 
     info = await bot.get_webhook_info()
 
-    logger.info("----------------------------------------")
+    logger.info("========================================")
     logger.info("WEBHOOK CONFIGURED")
-    logger.info("Telegram URL: %s", info.url)
+    logger.info("URL: %s", info.url)
     logger.info(
-        "Pending updates: %s",
+        "Pending: %s",
         info.pending_update_count,
     )
-
-    if info.last_error_message:
-        logger.error(
-            "Telegram webhook error: %s",
-            info.last_error_message,
-        )
-    else:
-        logger.info(
-            "Telegram webhook has no reported errors"
-        )
-
-    logger.info("----------------------------------------")
+    logger.info(
+        "Last error: %s",
+        info.last_error_message,
+    )
+    logger.info("========================================")
 
 
-future = asyncio.run_coroutine_threadsafe(
-    initialize_telegram(),
-    loop,
-)
+async def on_shutdown(app):
+    await bot.delete_webhook()
+    await bot.session.close()
 
 
-# ============================================================
-# Routes
-# ============================================================
+app = web.Application()
 
-@app.route("/", methods=["GET", "HEAD"])
-def home():
+app.router.add_get("/", home)
+app.router.add_head("/", home)
 
-    return jsonify({
-        "ok": True,
-        "service": "telegram-bot",
-        "status": "running",
-    })
+app.router.add_get("/health", health)
+app.router.add_head("/health", health)
 
+app.router.add_post("/webhook", webhook)
 
-@app.route("/health", methods=["GET"])
-def health():
+app.on_startup.append(on_startup)
+app.on_shutdown.append(on_shutdown)
 
-    return jsonify({
-        "ok": True,
-        "status": "healthy",
-    })
-
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-
-    try:
-
-        data = request.get_json(silent=True)
-
-        if not data:
-            logger.warning("Webhook received empty JSON")
-
-            return jsonify({
-                "ok": False,
-                "error": "empty json",
-            }), 400
-
-        logger.info(
-            "Webhook received update_id=%s",
-            data.get("update_id"),
-        )
-
-        update = Update.model_validate(data)
-
-        asyncio.run_coroutine_threadsafe(
-            dp.feed_update(bot, update),
-            loop,
-        )
-
-        return jsonify({
-            "ok": True,
-        }), 200
-
-    except Exception as exc:
-
-        logger.exception(
-            "Webhook error"
-        )
-
-        return jsonify({
-            "ok": False,
-            "error": str(exc),
-        }), 500
-
-
-@app.route("/bot-info", methods=["GET"])
-def bot_info():
-
-    try:
-
-        future = asyncio.run_coroutine_threadsafe(
-            bot.get_me(),
-            loop,
-        )
-
-        me = future.result(timeout=15)
-
-        return jsonify({
-            "ok": True,
-            "id": me.id,
-            "username": me.username,
-            "first_name": me.first_name,
-        })
-
-    except Exception as exc:
-
-        logger.exception(
-            "bot-info failed"
-        )
-
-        return jsonify({
-            "ok": False,
-            "error": str(exc),
-        }), 500
-
-
-@app.route("/webhook-info", methods=["GET"])
-def webhook_info():
-
-    try:
-
-        future = asyncio.run_coroutine_threadsafe(
-            bot.get_webhook_info(),
-            loop,
-        )
-
-        info = future.result(timeout=15)
-
-        return jsonify({
-            "ok": True,
-            "url": info.url,
-            "pending_update_count": info.pending_update_count,
-            "last_error_message": info.last_error_message,
-            "last_error_date": info.last_error_date,
-        })
-
-    except Exception as exc:
-
-        logger.exception(
-            "webhook-info failed"
-        )
-
-        return jsonify({
-            "ok": False,
-            "error": str(exc),
-        }), 500
-
-
-# ============================================================
-# Local
-# ============================================================
 
 if __name__ == "__main__":
-
     port = int(os.getenv("PORT", "10000"))
 
-    app.run(
+    web.run_app(
+        app,
         host="0.0.0.0",
         port=port,
-        threaded=True,
     )
