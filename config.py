@@ -1,7 +1,7 @@
 # config.py
 import os
 
-BOT_TOKEN = "8586016384:AAFNSMHw-2TsJGZBcHKNOHrOzOa_HliZC9E"
+BOT_TOKEN = "8586016384:AAHsfIE6JdmzBpp650lbw_9w25FBt8Tfbdg"
 ADMIN_IDS = [7351574618]
 
 # تنظیمات سطوح کاربری
