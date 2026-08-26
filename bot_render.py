@@ -11,69 +11,85 @@ from aiogram.types import Update
 
 
 # ============================================================
-# Logging
+# LOGGING
 # ============================================================
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
 logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# Environment
+# ENVIRONMENT
 # ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
-    raise RuntimeError(
-        "BOT_TOKEN environment variable is not set"
-    )
+    raise RuntimeError("BOT_TOKEN environment variable is not set")
 
 
-# Render خودش این مقدار را در اختیار سرویس قرار می‌دهد.
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+# ------------------------------------------------------------
+# ساخت URL به شکل امن
+#
+# WEBHOOK_URL اگر وجود داشته باشد:
+#   https://example.onrender.com
+#   https://example.onrender.com/webhook
+#
+# هر دو حالت را قبول می‌کنیم و فقط یک /webhook می‌گذاریم.
+# ------------------------------------------------------------
 
-# اگر WEBHOOK_URL را دستی در Render تنظیم کرده باشی، آن را هم قبول می‌کنیم.
-MANUAL_WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+render_url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+manual_url = os.getenv("WEBHOOK_URL", "").strip()
 
-
-if MANUAL_WEBHOOK_URL:
-    WEBHOOK_URL = MANUAL_WEBHOOK_URL.rstrip("/") + "/webhook"
-
-elif RENDER_EXTERNAL_URL:
-    WEBHOOK_URL = (
-        RENDER_EXTERNAL_URL.rstrip("/")
-        + "/webhook"
-    )
-
+if manual_url:
+    base_url = manual_url.rstrip("/")
 else:
+    base_url = render_url.rstrip("/")
+
+if not base_url:
     service_name = os.getenv(
         "RENDER_SERVICE_NAME",
-        "sms-4-mntp"
+        "sms-4-mntp",
     )
 
-    WEBHOOK_URL = (
-        f"https://{service_name}.onrender.com/webhook"
-    )
+    base_url = f"https://{service_name}.onrender.com"
+
+# جلوگیری از /webhook/webhook
+if base_url.endswith("/webhook"):
+    WEBHOOK_URL = base_url
+else:
+    WEBHOOK_URL = f"{base_url}/webhook"
+
+
+# ------------------------------------------------------------
+# اختیاری: Secret برای webhook
+# ------------------------------------------------------------
+
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
 
 
 logger.info("BOT_TOKEN is configured")
 logger.info("WEBHOOK_URL: %s", WEBHOOK_URL)
 
+if WEBHOOK_SECRET:
+    logger.info("WEBHOOK_SECRET is enabled")
+else:
+    logger.info("WEBHOOK_SECRET is disabled")
+
 
 # ============================================================
-# Flask
+# FLASK
 # ============================================================
 
 app = Flask(__name__)
 
 
 # ============================================================
-# Telegram
+# TELEGRAM
 # ============================================================
 
 bot = Bot(token=BOT_TOKEN)
@@ -81,207 +97,232 @@ dp = Dispatcher()
 
 
 # ============================================================
-# Dedicated asyncio event loop
+# ASYNCIO EVENT LOOP
 # ============================================================
 
 loop = asyncio.new_event_loop()
 
 
-def start_async_loop():
-    """
-    اجرای دائمی event loop در یک thread جدا.
-    """
-
+def async_worker():
     asyncio.set_event_loop(loop)
 
     logger.info("Async event loop started")
 
     try:
         loop.run_forever()
-
     except Exception:
-        logger.exception(
-            "Async event loop crashed"
-        )
+        logger.exception("Async event loop crashed")
 
 
 loop_thread = threading.Thread(
-    target=start_async_loop,
-    name="telegram-async-loop",
-    daemon=True
+    target=async_worker,
+    name="telegram-event-loop",
+    daemon=True,
 )
 
 loop_thread.start()
 
 
 # ============================================================
-# Telegram Handlers
+# TELEGRAM HANDLERS
 # ============================================================
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
 
+    user_id = (
+        message.from_user.id
+        if message.from_user
+        else "unknown"
+    )
+
+    first_name = (
+        message.from_user.first_name
+        if message.from_user
+        else "دوست"
+    )
+
+    logger.info(
+        "START received from user=%s",
+        user_id,
+    )
+
     try:
-
-        first_name = (
-            message.from_user.first_name
-            if message.from_user
-            else "دوست"
-        )
-
         await message.answer(
             f"👋 سلام {first_name}!\n\n"
-            "✅ ربات با موفقیت روی Render اجرا شده است.\n\n"
-            "برای تست اتصال، /ping را ارسال کنید."
+            "✅ ربات با موفقیت اجرا شده.\n"
+            "✅ اتصال Telegram → Render برقرار است.\n\n"
+            "برای تست بیشتر /ping را بفرست."
         )
 
         logger.info(
-            "Processed /start from user %s",
-            message.from_user.id if message.from_user else "unknown"
+            "START response sent to user=%s",
+            user_id,
         )
 
     except Exception:
         logger.exception(
-            "Error in start handler"
+            "Failed to send START response"
         )
 
 
 @dp.message(Command("ping"))
 async def ping_handler(message: types.Message):
 
-    try:
+    user_id = (
+        message.from_user.id
+        if message.from_user
+        else "unknown"
+    )
 
+    logger.info(
+        "PING received from user=%s",
+        user_id,
+    )
+
+    try:
         await message.answer(
-            "🏓 Pong!\n"
-            "✅ ربات فعال است."
+            "🏓 Pong!\n\n"
+            "✅ Bot is alive\n"
+            "✅ Telegram connected\n"
+            "✅ Render connected"
         )
 
         logger.info(
-            "Processed /ping from user %s",
-            message.from_user.id if message.from_user else "unknown"
+            "PING response sent to user=%s",
+            user_id,
         )
 
     except Exception:
         logger.exception(
-            "Error in ping handler"
+            "Failed to send PING response"
         )
 
 
 # ============================================================
-# Process Telegram Update
+# PROCESS UPDATE
 # ============================================================
 
 async def process_update(update: Update):
-    """
-    پردازش Update در event loop اصلی asyncio.
-    """
+
+    logger.info(
+        "Processing Telegram update id=%s",
+        update.update_id,
+    )
 
     try:
 
-        logger.info(
-            "Processing Telegram update: %s",
-            update.update_id
-        )
-
         await dp.feed_update(
             bot,
-            update
+            update,
         )
 
         logger.info(
-            "Telegram update processed: %s",
-            update.update_id
+            "Telegram update processed id=%s",
+            update.update_id,
         )
 
     except Exception:
         logger.exception(
-            "Error while processing Telegram update"
+            "Error processing Telegram update id=%s",
+            update.update_id,
         )
 
 
 # ============================================================
-# Webhook Setup
+# WEBHOOK SETUP
 # ============================================================
 
 async def setup_webhook():
 
+    logger.info("----------------------------------------")
+    logger.info("Setting Telegram webhook")
+    logger.info("Webhook URL: %s", WEBHOOK_URL)
+
     try:
 
-        logger.info(
-            "Setting Telegram webhook..."
-        )
+        # ----------------------------------------------------
+        # تست BOT TOKEN
+        # ----------------------------------------------------
 
-        logger.info(
-            "Webhook URL: %s",
-            WEBHOOK_URL
-        )
-
-        # تست Token
         me = await bot.get_me()
 
         logger.info(
             "Telegram bot: @%s",
-            me.username
+            me.username,
         )
 
+        logger.info(
+            "Telegram bot ID: %s",
+            me.id,
+        )
+
+        # ----------------------------------------------------
         # تنظیم webhook
-        await bot.set_webhook(
-            url=WEBHOOK_URL,
-            allowed_updates=dp.resolve_used_update_types(),
-            drop_pending_updates=False
-        )
+        # ----------------------------------------------------
 
-        # بررسی webhook
-        webhook_info = await bot.get_webhook_info()
+        kwargs = {
+            "url": WEBHOOK_URL,
+            "allowed_updates": dp.resolve_used_update_types(),
+            "drop_pending_updates": False,
+        }
 
-        logger.info(
-            "Webhook successfully configured"
-        )
+        if WEBHOOK_SECRET:
+            kwargs["secret_token"] = WEBHOOK_SECRET
 
-        logger.info(
-            "Telegram webhook URL: %s",
-            webhook_info.url
-        )
+        await bot.set_webhook(**kwargs)
 
+        # ----------------------------------------------------
+        # بررسی واقعی webhook
+        # ----------------------------------------------------
+
+        info = await bot.get_webhook_info()
+
+        logger.info("----------------------------------------")
+        logger.info("WEBHOOK CONFIGURED")
+        logger.info("Telegram URL: %s", info.url)
         logger.info(
             "Pending updates: %s",
-            webhook_info.pending_update_count
+            info.pending_update_count,
         )
 
-        if webhook_info.last_error_message:
-
-            logger.warning(
-                "Telegram webhook error: %s",
-                webhook_info.last_error_message
+        if info.last_error_date:
+            logger.error(
+                "Telegram last error date: %s",
+                info.last_error_date,
             )
 
+        if info.last_error_message:
+            logger.error(
+                "Telegram last error: %s",
+                info.last_error_message,
+            )
         else:
-
             logger.info(
                 "Telegram webhook has no reported errors"
             )
 
-    except Exception:
+        logger.info("----------------------------------------")
 
+    except Exception:
         logger.exception(
-            "Failed to configure Telegram webhook"
+            "FAILED TO CONFIGURE TELEGRAM WEBHOOK"
         )
 
 
 # ============================================================
-# Start webhook setup
+# START WEBHOOK SETUP
 # ============================================================
 
 setup_future = asyncio.run_coroutine_threadsafe(
     setup_webhook(),
-    loop
+    loop,
 )
 
 
-def log_setup_result(future):
+def setup_done_callback(future):
 
     try:
-
         future.result()
 
         logger.info(
@@ -289,130 +330,165 @@ def log_setup_result(future):
         )
 
     except Exception:
-
         logger.exception(
             "Webhook setup task failed"
         )
 
 
 setup_future.add_done_callback(
-    log_setup_result
+    setup_done_callback
 )
 
 
 # ============================================================
-# Flask Routes
+# ROOT
 # ============================================================
 
 @app.route("/", methods=["GET", "HEAD"])
 def home():
 
-    return (
-        "Telegram Bot is running!",
-        200
-    )
+    return jsonify({
+        "ok": True,
+        "service": "telegram-bot",
+        "status": "running",
+    }), 200
 
+
+# ============================================================
+# HEALTH
+# ============================================================
 
 @app.route("/health", methods=["GET", "HEAD"])
 def health():
 
-    return (
-        "OK",
-        200
-    )
+    return jsonify({
+        "ok": True,
+        "status": "healthy",
+    }), 200
 
 
 # ============================================================
-# Telegram Webhook
+# TELEGRAM WEBHOOK
 # ============================================================
 
 @app.route("/webhook", methods=["POST"])
-def webhook():
+def telegram_webhook():
 
-    try:
+    # --------------------------------------------------------
+    # Secret verification
+    # --------------------------------------------------------
 
-        # دریافت JSON
-        data = request.get_json(
-            silent=True
+    if WEBHOOK_SECRET:
+
+        received_secret = request.headers.get(
+            "X-Telegram-Bot-Api-Secret-Token",
+            "",
         )
 
-        if not data:
+        if received_secret != WEBHOOK_SECRET:
 
             logger.warning(
-                "Received empty webhook request"
+                "Rejected webhook: invalid secret"
             )
 
             return jsonify({
                 "ok": False,
-                "error": "Empty JSON"
-            }), 400
+                "error": "Unauthorized",
+            }), 401
 
+    # --------------------------------------------------------
+    # JSON
+    # --------------------------------------------------------
 
-        # تبدیل JSON به Telegram Update
-        update = Update.model_validate(
-            data
-        )
+    data = request.get_json(silent=True)
 
+    if not isinstance(data, dict):
 
-        logger.info(
-            "Received Telegram update: %s",
-            update.update_id
-        )
-
-
-        # ----------------------------------------------------
-        # مهم:
-        #
-        # اینجا دیگر future.result() نداریم.
-        #
-        # Flask نباید منتظر پاسخ Telegram بماند.
-        # ----------------------------------------------------
-
-        future = asyncio.run_coroutine_threadsafe(
-            process_update(update),
-            loop
-        )
-
-
-        # اگر پردازش async خطا بدهد، در لاگ ثبت می‌شود.
-        def update_done_callback(done_future):
-
-            try:
-
-                done_future.result()
-
-            except Exception:
-
-                logger.exception(
-                    "Telegram update task failed"
-                )
-
-
-        future.add_done_callback(
-            update_done_callback
-        )
-
-
-        # Telegram باید سریع 200 دریافت کند.
-        return jsonify({
-            "ok": True
-        }), 200
-
-
-    except Exception as e:
-
-        logger.exception(
-            "Webhook parsing/processing error"
+        logger.warning(
+            "Webhook received invalid JSON"
         )
 
         return jsonify({
             "ok": False,
-            "error": str(e)
+            "error": "Invalid JSON",
+        }), 400
+
+    # --------------------------------------------------------
+    # Convert Telegram JSON → Update
+    # --------------------------------------------------------
+
+    try:
+
+        update = Update.model_validate(data)
+
+    except Exception:
+
+        logger.exception(
+            "Could not parse Telegram update"
+        )
+
+        return jsonify({
+            "ok": False,
+            "error": "Invalid Telegram update",
+        }), 400
+
+    logger.info(
+        "RECEIVED TELEGRAM UPDATE id=%s",
+        update.update_id,
+    )
+
+    # --------------------------------------------------------
+    # Send update to asyncio loop
+    # --------------------------------------------------------
+
+    try:
+
+        future = asyncio.run_coroutine_threadsafe(
+            process_update(update),
+            loop,
+        )
+
+        # ----------------------------------------------------
+        # فقط callback ثبت می‌کنیم.
+        # Flask منتظر Telegram نمی‌ماند.
+        # ----------------------------------------------------
+
+        def update_done(done_future):
+
+            try:
+                done_future.result()
+
+            except Exception:
+                logger.exception(
+                    "Telegram update task failed"
+                )
+
+        future.add_done_callback(
+            update_done
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Could not schedule Telegram update"
+        )
+
+        return jsonify({
+            "ok": False,
+            "error": "Could not schedule update",
         }), 500
+
+    # --------------------------------------------------------
+    # پاسخ سریع به Telegram
+    # --------------------------------------------------------
+
+    return jsonify({
+        "ok": True,
+    }), 200
 
 
 # ============================================================
-# Webhook Information
+# WEBHOOK INFO
 # ============================================================
 
 @app.route("/webhook-info", methods=["GET"])
@@ -422,11 +498,11 @@ def webhook_info():
 
         future = asyncio.run_coroutine_threadsafe(
             bot.get_webhook_info(),
-            loop
+            loop,
         )
 
         info = future.result(
-            timeout=15
+            timeout=15,
         )
 
         return jsonify({
@@ -440,9 +516,11 @@ def webhook_info():
             ),
             "last_error_message": (
                 info.last_error_message
-            )
+            ),
+            "max_connections": (
+                info.max_connections
+            ),
         }), 200
-
 
     except Exception as e:
 
@@ -452,12 +530,12 @@ def webhook_info():
 
         return jsonify({
             "ok": False,
-            "error": str(e)
+            "error": str(e),
         }), 500
 
 
 # ============================================================
-# Telegram Info
+# BOT INFO
 # ============================================================
 
 @app.route("/bot-info", methods=["GET"])
@@ -467,20 +545,19 @@ def bot_info():
 
         future = asyncio.run_coroutine_threadsafe(
             bot.get_me(),
-            loop
+            loop,
         )
 
         me = future.result(
-            timeout=15
+            timeout=15,
         )
 
         return jsonify({
             "ok": True,
             "id": me.id,
             "username": me.username,
-            "first_name": me.first_name
+            "first_name": me.first_name,
         }), 200
-
 
     except Exception as e:
 
@@ -490,61 +567,39 @@ def bot_info():
 
         return jsonify({
             "ok": False,
-            "error": str(e)
+            "error": str(e),
         }), 500
 
 
 # ============================================================
-# Cleanup
-# ============================================================
-
-def cleanup():
-
-    try:
-
-        if loop.is_running():
-
-            future = asyncio.run_coroutine_threadsafe(
-                bot.session.close(),
-                loop
-            )
-
-            future.result(
-                timeout=10
-            )
-
-            loop.call_soon_threadsafe(
-                loop.stop
-            )
-
-    except Exception:
-
-        logger.exception(
-            "Error while closing Telegram session"
-        )
-
-
-# ============================================================
-# Local execution
+# LOCAL
 # ============================================================
 
 if __name__ == "__main__":
 
+    port = int(
+        os.getenv(
+            "PORT",
+            "10000",
+        )
+    )
+
     logger.info(
-        "Starting Flask development server..."
+        "Starting local Flask server"
+    )
+
+    logger.info(
+        "Port: %s",
+        port,
     )
 
     logger.info(
         "Webhook URL: %s",
-        WEBHOOK_URL
-    )
-
-    port = int(
-        os.getenv("PORT", "10000")
+        WEBHOOK_URL,
     )
 
     app.run(
         host="0.0.0.0",
         port=port,
-        threaded=True
+        threaded=True,
     )
