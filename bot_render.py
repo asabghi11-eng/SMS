@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+BOT_TOKEN = os.getenv("8586016384:AAFNSMHw-2TsJGZBcHKNOHrOzOa_HliZC9E")
+WEBHOOK_URL = os.getenv("https://sms-4-mntp.onrender.com/webhook")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is not set")
