@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# ============================================================
 # Environment
 # ============================================================
 
@@ -32,6 +31,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is not set")
 
+
+# Render URL
 render_url = os.getenv("RENDER_EXTERNAL_URL")
 
 if render_url:
@@ -49,27 +50,9 @@ else:
             f"https://{service_name}.onrender.com/webhook"
         )
 
+
 logger.info("BOT_TOKEN is configured")
 logger.info("WEBHOOK_URL: %s", WEBHOOK_URL)
-# ============================================================
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN environment variable is not set")
-
-if not WEBHOOK_URL:
-    render_url = os.getenv("RENDER_EXTERNAL_URL")
-
-    if render_url:
-        WEBHOOK_URL = f"{render_url.rstrip('/')}/webhook"
-    else:
-        service_name = os.getenv(
-            "RENDER_SERVICE_NAME",
-            "sms-bomber-bot-dsxz"
-        )
-        WEBHOOK_URL = f"https://{service_name}.onrender.com/webhook"
 
 
 # ============================================================
@@ -116,6 +99,7 @@ loop_thread.start()
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
+
     first_name = message.from_user.first_name or "دوست"
 
     await message.answer(
@@ -127,6 +111,7 @@ async def start_handler(message: types.Message):
 
 @dp.message(Command("ping"))
 async def ping_handler(message: types.Message):
+
     await message.answer(
         "🏓 Pong!\n"
         "✅ ربات فعال است."
@@ -138,7 +123,9 @@ async def ping_handler(message: types.Message):
 # ============================================================
 
 async def setup_webhook():
+
     try:
+
         logger.info("Setting Telegram webhook...")
         logger.info("Webhook URL: %s", WEBHOOK_URL)
 
@@ -166,12 +153,14 @@ async def setup_webhook():
         )
 
         if webhook_info.last_error_message:
+
             logger.warning(
                 "Telegram webhook error: %s",
                 webhook_info.last_error_message
             )
 
     except Exception:
+
         logger.exception(
             "Failed to configure Telegram webhook"
         )
@@ -193,30 +182,49 @@ setup_future = asyncio.run_coroutine_threadsafe(
 
 @app.route("/", methods=["GET", "HEAD"])
 def home():
+
     return "Telegram Bot is running!", 200
 
 
 @app.route("/health", methods=["GET"])
 def health():
+
     return "OK", 200
 
+
+# ============================================================
+# Telegram Webhook
+# ============================================================
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
 
     try:
+
         data = request.get_json(silent=True)
 
         if not data:
-            logger.warning("Received empty webhook request")
+
+            logger.warning(
+                "Received empty webhook request"
+            )
+
             return jsonify({
                 "ok": False,
                 "error": "Empty JSON"
             }), 400
 
+
         update = Update.model_validate(data)
 
-        future = asyncio.run_coroutine_threadsafe(
+
+        # Send update to the asyncio event loop.
+        #
+        # IMPORTANT:
+        # We do NOT wait with future.result().
+        # Telegram needs a fast HTTP 200 response.
+
+        asyncio.run_coroutine_threadsafe(
             dp.feed_update(
                 bot,
                 update
@@ -224,12 +232,11 @@ def webhook():
             loop
         )
 
-        # Wait until aiogram processes the update.
-        future.result(timeout=30)
 
         return jsonify({
             "ok": True
         }), 200
+
 
     except Exception as e:
 
@@ -244,7 +251,7 @@ def webhook():
 
 
 # ============================================================
-# Optional webhook information
+# Webhook Information
 # ============================================================
 
 @app.route("/webhook-info", methods=["GET"])
@@ -266,6 +273,7 @@ def webhook_info():
             "last_error_message": info.last_error_message
         })
 
+
     except Exception as e:
 
         logger.exception(
@@ -285,6 +293,7 @@ def webhook_info():
 def cleanup():
 
     try:
+
         future = asyncio.run_coroutine_threadsafe(
             bot.session.close(),
             loop
@@ -293,6 +302,7 @@ def cleanup():
         future.result(timeout=10)
 
     except Exception:
+
         logger.exception(
             "Error while closing Telegram session"
         )
@@ -321,4 +331,3 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=port
     )
-
