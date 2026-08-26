@@ -23,23 +23,34 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-BOT_TOKEN = os.getenv("8586016384:AAHsfIE6JdmzBpp650lbw_9w25FBt8Tfbdg")
-WEBHOOK_URL = os.getenv("https://sms-4-mntp.onrender.com/webhook")
+# ============================================================
+# Environment
+# ============================================================
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is not set")
 
-if not WEBHOOK_URL:
-    render_url = os.getenv("RENDER_EXTERNAL_URL")
+render_url = os.getenv("RENDER_EXTERNAL_URL")
 
-    if render_url:
-        WEBHOOK_URL = f"{render_url.rstrip('/')}/webhook"
-    else:
+if render_url:
+    WEBHOOK_URL = f"{render_url.rstrip('/')}/webhook"
+else:
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
+    if not WEBHOOK_URL:
         service_name = os.getenv(
             "RENDER_SERVICE_NAME",
-            "sms-bomber-bot-dsxz"
+            "sms-4-mntp"
         )
-        WEBHOOK_URL = f"https://{service_name}.onrender.com/webhook"
+
+        WEBHOOK_URL = (
+            f"https://{service_name}.onrender.com/webhook"
+        )
+
+logger.info("BOT_TOKEN is configured")
+logger.info("WEBHOOK_URL: %s", WEBHOOK_URL)
 # ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
